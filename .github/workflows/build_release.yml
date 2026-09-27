@@ -31,6 +31,7 @@ jobs:
         run: |
           flutter create --platforms=android --project-name bedrock_smith .
           flutter pub get
+          if [ -f assets/icon.png ]; then dart run flutter_launcher_icons; fi
 
       - name: Configure Android Manifest Permissions
         run: |
@@ -64,6 +65,7 @@ jobs:
           flutter config --enable-windows-desktop
           flutter create --platforms=windows --project-name bedrock_smith .
           flutter pub get
+          if (Test-Path "assets\icon.png") { dart run flutter_launcher_icons }
 
       - name: Build Standalone Windows Bundle
         env:
