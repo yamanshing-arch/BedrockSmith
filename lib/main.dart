@@ -40,6 +40,7 @@ class AddonEntry {
   String name;
   String currentVersion;
   PackType type;
+  int? originalPriority;
   bool inMegaPack;
   bool isTrinketBridge;
 
@@ -48,6 +49,7 @@ class AddonEntry {
     required this.name,
     required this.currentVersion,
     required this.type,
+    this.originalPriority,
     this.inMegaPack = true,
     this.isTrinketBridge = false,
   });
@@ -57,6 +59,7 @@ class AddonEntry {
         'name': name,
         'currentVersion': currentVersion,
         'type': type.name,
+        'originalPriority': originalPriority,
         'inMegaPack': inMegaPack,
         'isTrinketBridge': isTrinketBridge,
       };
@@ -66,6 +69,7 @@ class AddonEntry {
         name: map['name'] ?? '',
         currentVersion: map['currentVersion'] ?? 'v1.0.0',
         type: map['type'] == 'behavior' ? PackType.behavior : PackType.resource,
+        originalPriority: map['originalPriority'],
         inMegaPack: map['inMegaPack'] ?? true,
         isTrinketBridge: map['isTrinketBridge'] ?? false,
       );
@@ -88,41 +92,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   int _bundleRevision = 1;
   String _bundleName = 'ATM_Mega_Pack';
 
-  static const Set<String> _ignoredKeywords = {
-    'GENERAL',
-    'ADVANCED',
-    'MULTIPLAYER',
-    'CHEATS',
-    'EXPERIMENT',
-    'EXPERIMENTS',
-    'CEXPERIMENT',
-    'RESOURCE PACKS',
-    'RIESOURCE PACKS',
-    'BEHAVIOUR PACKS',
-    'BEHAVIOR PACKS',
-    'MY PACKS',
-    'ACTIVE',
-    'AVAILABLE',
-    'DEACTIVATE',
-    'SETTINGS',
-    'GLOBAL RESOURCES',
-    'STORAGE',
-    'MINECRAFT',
-    'REALMS',
-    'EDIT',
-    'REMOVE',
-    'IEMOVE',
-    'SELECT',
-    'BACK',
-    'PLAY',
-    'WORLD',
-    'CREATE',
-    'CANCEL',
-    'DONE',
-    'TEXTURES',
-    'DEFAULT',
-  };
-
   @override
   void initState() {
     super.initState();
@@ -138,7 +107,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_list_v2');
+    final savedData = prefs.getString('saved_addons_v7');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -156,7 +125,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_list_v2', encoded);
+    await prefs.setString('saved_addons_v7', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -175,20 +144,25 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       int totalFound = 0;
 
       for (final image in images) {
+        final file = File(image.path);
+        final bytes = await file.readAsBytes();
+        final decodedImage = await decodeImageFromList(bytes);
+        final double imgWidth = decodedImage.width.toDouble();
+        final double imgHeight = decodedImage.height.toDouble();
+
         final inputImage = InputImage.fromFilePath(image.path);
         final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
-        totalFound += _parseExtractedText(recognizedText.text, targetType);
+
+        totalFound += _processSpatialRecognition(recognizedText, targetType, imgWidth, imgHeight);
       }
 
       await textRecognizer.close();
 
       if (mounted) {
-        final label = targetType == PackType.resource ? 'Resource Pack' : 'Behavior Pack';
+        final label = targetType == PackType.resource ? 'Resource' : 'Behavior';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(totalFound > 0
-                ? 'Added $totalFound$label(s) to your collection!'
-                : 'Scanned images, but no new $label titles were recognized.'),
+            content: Text('Cleanly detected $totalFound$label Pack(s) in priority sequence!'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
@@ -196,7 +170,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error analyzing screenshots: $e')),
+          SnackBar(content: Text('Scan error: $e')),
         );
       }
     } finally {
@@ -206,110 +180,116 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     }
   }
 
-  int _parseExtractedText(String rawText, PackType targetType) {
-    final lines = rawText
-        .split('\n')
-        .map((l) => l.trim())
-        .where((l) => l.isNotEmpty)
-        .toList();
+  int _processSpatialRecognition(RecognizedText recognized, PackType targetType, double imgWidth, double imgHeight) {
+    final List<AddonEntry> parsedPacks = [];
 
-    final List<AddonEntry> newAddons = [];
+    // Spatial boundaries isolating the pack names and numbers:
+    final minX = imgWidth * 0.33;
+    final maxX = imgWidth * 0.82;
+    final minY = imgHeight * 0.08;
+    final maxY = imgHeight * 0.88;
 
-    for (int i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      line = line.replaceAll(RegExp(r'^[\]\[|/\\•\-_]+\s*'), '').trim();
-      final upper = line.toUpperCase();
+    final blockedTerms = [
+      'SETTINGS', 'GENERAL', 'ADVANCED', 'MULTIPLAYER', 'CHEATS', 'RESOURCE PACKS',
+      'BEHAVIOUR PACKS', 'BEHAVIOR PACKS', 'ACTIVE', 'MY PACKS', 'AVAILABLE', 'DEACTIVATE',
+      'STORAGE', 'EXPERIMENT', 'CHANGES TO THE SAME', 'IF MULTIPLE', 'CREATOR', 'GLOBAL RESOURCES',
+      'MINECRAFT', 'FEEDBACK', 'HELP', 'HOW TO PLAY', 'AUDIO', 'VIDEO', 'KEYBOARD', 'CONTROLLER',
+      'TOUCH', 'SUBSCRIPTION', 'REALMS', 'EDIT WORLD', 'ACHIEVEMENTS', 'SAME ENTITY'
+    ];
 
-      if (line.length < 3 || _ignoredKeywords.contains(upper)) {
-        continue;
-      }
+    for (final block in recognized.blocks) {
+      for (final line in block.lines) {
+        final box = line.boundingBox;
 
-      bool isBlocked = false;
-      for (final kw in _ignoredKeywords) {
-        if (upper == kw || upper == '$kw S' || upper.startsWith('$kw ')) {
-          if (!upper.contains('DELIGHT') && !upper.contains('WAILA') && !upper.contains('LIGHT')) {
-            isBlocked = true;
-            break;
-          }
+        if (box.left < minX || box.right > maxX || box.top < minY || box.bottom > maxY) {
+          continue;
         }
-      }
-      if (isBlocked) continue;
 
-      final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(line);
-      String foundVersion = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
+        var text = line.text.trim();
+        final upper = text.toUpperCase();
 
-      String addonName = line;
-      if (versionMatch != null && line.length <= 8) {
-        continue;
-      }
+        if (text.length < 3 || RegExp(r'^[^a-zA-Z0-9]+$').hasMatch(text)) {
+          continue;
+        }
 
-      addonName = addonName.replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?'), '').trim();
-      if (addonName.isEmpty || addonName.length < 3) continue;
+        if (blockedTerms.any((term) => upper.contains(term))) {
+          continue;
+        }
 
-      // Deduce pack type preference if explicit in name, otherwise respect the tab
-      PackType assignedType = targetType;
-      if (addonName.toLowerCase().endsWith(' rp') || addonName.toLowerCase().contains('[rf]')) {
-        assignedType = PackType.resource;
-      } else if (addonName.toLowerCase().endsWith(' bp')) {
-        assignedType = PackType.behavior;
-      }
+        if (text.split(' ').length > 8 || text.endsWith('.')) {
+          continue;
+        }
 
-      final isBridge = addonName.toLowerCase().contains('trinket') ||
-          addonName.toLowerCase().contains('curios') ||
-          addonName.toLowerCase().contains('accessory') ||
-          addonName.toLowerCase().contains('api') ||
-          addonName.toLowerCase().contains('core');
+        // Priority extraction (#1 - #99)
+        int? priorityNumber;
+        final priorityMatch = RegExp(r'^(?:::|#|:)?\s*(\d{1,3})\b').firstMatch(text);
+        if (priorityMatch != null) {
+          priorityNumber = int.tryParse(priorityMatch.group(1)!);
+          text = text.replaceFirst(priorityMatch.group(0)!, '').trim();
+        }
 
-      final alreadyExists = _detectedAddons.any(
-            (a) => a.name.toLowerCase() == addonName.toLowerCase() && a.type == assignedType,
-          ) ||
-          newAddons.any(
-            (a) => a.name.toLowerCase() == addonName.toLowerCase() && a.type == assignedType,
-          );
+        text = text.replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?]+\s*'), '').trim();
+        if (text.length < 3) continue;
 
-      if (!alreadyExists) {
-        newAddons.add(AddonEntry(
-          id: const Uuid().v4(),
-          name: addonName,
-          currentVersion: foundVersion,
-          type: assignedType,
-          inMegaPack: true,
-          isTrinketBridge: isBridge,
-        ));
+        // Version extraction
+        final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(text);
+        String version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
+
+        var cleanTitle = text
+            .replaceAll(RegExp(r'\[v?\d+\.\d+(\.\d+)?\]', caseSensitive: false), '')
+            .replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?', caseSensitive: false), '')
+            .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•\s]+'), '')
+            .replaceAll(RegExp(r'[\]\[]+'), '')
+            .trim();
+
+        if (cleanTitle.length < 3) continue;
+
+        final lowerTitle = cleanTitle.toLowerCase();
+        final isBridge = lowerTitle.contains('trinket') ||
+            lowerTitle.contains('curios') ||
+            lowerTitle.contains('amulet') ||
+            lowerTitle.contains('backpack') ||
+            lowerTitle.contains('neck') ||
+            lowerTitle.contains('api') ||
+            lowerTitle.contains('core');
+
+        final exists = _detectedAddons.any(
+              (a) => a.name.toLowerCase() == lowerTitle && a.type == targetType,
+            ) ||
+            parsedPacks.any(
+              (a) => a.name.toLowerCase() == lowerTitle && a.type == targetType,
+            );
+
+        if (!exists) {
+          parsedPacks.add(AddonEntry(
+            id: const Uuid().v4(),
+            name: cleanTitle,
+            currentVersion: version,
+            type: targetType,
+            originalPriority: priorityNumber,
+            inMegaPack: true,
+            isTrinketBridge: isBridge,
+          ));
+        }
       }
     }
 
-    if (newAddons.isNotEmpty) {
+    if (parsedPacks.isNotEmpty) {
       setState(() {
-        _detectedAddons.addAll(newAddons);
+        _detectedAddons.addAll(parsedPacks);
+        _detectedAddons.sort((a, b) {
+          if (a.originalPriority != null && b.originalPriority != null) {
+            return a.originalPriority!.compareTo(b.originalPriority!);
+          }
+          if (a.originalPriority != null) return -1;
+          if (b.originalPriority != null) return 1;
+          return 0;
+        });
       });
       _persistState();
     }
 
-    return newAddons.length;
-  }
-
-  void _autoSortSectionOrder(PackType type) {
-    setState(() {
-      final sectionItems = _detectedAddons.where((a) => a.type == type).toList();
-      final otherItems = _detectedAddons.where((a) => a.type != type).toList();
-
-      sectionItems.sort((a, b) {
-        if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
-        if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
-
-      _detectedAddons = [...sectionItems, ...otherItems];
-    });
-    _persistState();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Auto-sorted ${type == PackType.resource ? "Resource" : "Behavior"} Packs!'),
-        backgroundColor: const Color(0xFF107C41),
-      ),
-    );
+    return parsedPacks.length;
   }
 
   void _showManageMegaPackSheet() {
@@ -327,7 +307,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
           return DraggableScrollableSheet(
             expand: false,
-            initialChildSize: 0.8,
+            initialChildSize: 0.85,
             maxChildSize: 0.95,
             minChildSize: 0.4,
             builder: (_, scrollController) => Column(
@@ -341,7 +321,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Mega-Pack Bundler (RP + BP)',
+                            'Mega-Pack Bundler',
                             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                           Text(
@@ -362,17 +342,31 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
                   child: ListView(
                     controller: scrollController,
                     children: [
-                      _buildReorderableSectionHeader('Behavior Packs (Scripts & Logic)', PackType.behavior, () {
-                        _autoSortSectionOrder(PackType.behavior);
+                      _buildReorderSectionHeader('Behavior Packs', PackType.behavior, () {
+                        setState(() {
+                          _detectedAddons.sort((a, b) {
+                            if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
+                            if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
+                            return (a.originalPriority ?? 999).compareTo(b.originalPriority ?? 999);
+                          });
+                        });
                         setModalState(() {});
+                        _persistState();
                       }),
-                      _buildSectionReorderList(PackType.behavior, setModalState),
+                      _buildReorderList(PackType.behavior, setModalState),
                       const SizedBox(height: 16),
-                      _buildReorderableSectionHeader('Resource Packs (Textures & Models)', PackType.resource, () {
-                        _autoSortSectionOrder(PackType.resource);
+                      _buildReorderSectionHeader('Resource Packs', PackType.resource, () {
+                        setState(() {
+                          _detectedAddons.sort((a, b) {
+                            if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
+                            if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
+                            return (a.originalPriority ?? 999).compareTo(b.originalPriority ?? 999);
+                          });
+                        });
                         setModalState(() {});
+                        _persistState();
                       }),
-                      _buildSectionReorderList(PackType.resource, setModalState),
+                      _buildReorderList(PackType.resource, setModalState),
                     ],
                   ),
                 ),
@@ -407,9 +401,9 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     );
   }
 
-  Widget _buildReorderableSectionHeader(String title, PackType type, VoidCallback onSort) {
+  Widget _buildReorderSectionHeader(String title, PackType type, VoidCallback onSort) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
@@ -417,7 +411,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           TextButton.icon(
             style: TextButton.styleFrom(foregroundColor: const Color(0xFF52B788)),
             icon: const Icon(Icons.sort, size: 16),
-            label: const Text('Sort', style: TextStyle(fontSize: 12)),
+            label: const Text('Priority Order', style: TextStyle(fontSize: 12)),
             onPressed: onSort,
           ),
         ],
@@ -425,12 +419,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     );
   }
 
-  Widget _buildSectionReorderList(PackType type, StateSetter setModalState) {
+  Widget _buildReorderList(PackType type, StateSetter setModalState) {
     final list = _detectedAddons.where((a) => a.type == type).toList();
     if (list.isEmpty) {
       return const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-        child: Text('No packs scanned for this section.', style: TextStyle(color: Colors.white30, fontSize: 12)),
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Text('No packs scanned in this category.', style: TextStyle(color: Colors.white30, fontSize: 12)),
       );
     }
 
@@ -444,9 +438,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           final item = list.removeAt(oldIndex);
           list.insert(newIndex, item);
 
-          // Update main state order
-          final otherItems = _detectedAddons.where((a) => a.type != type).toList();
-          _detectedAddons = type == PackType.behavior ? [...list, ...otherItems] : [...otherItems, ...list];
+          final others = _detectedAddons.where((a) => a.type != type).toList();
+          _detectedAddons = type == PackType.behavior ? [...list, ...others] : [...others, ...list];
         });
         setModalState(() {});
         _persistState();
@@ -459,6 +452,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           decoration: BoxDecoration(
             color: const Color(0xFF1E232B),
             borderRadius: BorderRadius.circular(8),
+            border: addon.isTrinketBridge ? Border.all(color: const Color(0xFF52B788).withOpacity(0.4)) : null,
           ),
           child: ListTile(
             dense: true,
@@ -466,8 +460,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               radius: 12,
               backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
               child: Text(
-                '${index + 1}',
-                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+                addon.originalPriority != null ? '${addon.originalPriority}' : '${index + 1}',
+                style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold),
               ),
             ),
             title: Text(addon.name, style: TextStyle(fontSize: 13, color: addon.inMegaPack ? Colors.white : Colors.white38)),
@@ -511,7 +505,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Bundles ${activeRPs.length} Resource Pack(s) and${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
+              'Bundling ${activeRPs.length} Resource Pack(s) and${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
               style: const TextStyle(fontSize: 13, color: Colors.white70),
             ),
             const SizedBox(height: 12),
@@ -549,8 +543,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     List<AddonEntry> behaviorPacks,
   ) async {
     final masterUuid = _bundleMasterUuid ?? const Uuid().v4();
-    final bpModuleUuid = const Uuid().v4();
-    final rpModuleUuid = const Uuid().v4();
     final currentRev = _bundleRevision;
 
     final List<Map<String, dynamic>> modules = [];
@@ -558,7 +550,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       modules.add({
         'description': 'ATM Combined Behavior Pack Modules',
         'type': 'data',
-        'uuid': bpModuleUuid,
+        'uuid': const Uuid().v4(),
         'version': [1, currentRev, 0],
       });
     }
@@ -566,7 +558,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       modules.add({
         'description': 'ATM Combined Resource Pack Modules',
         'type': 'resources',
-        'uuid': rpModuleUuid,
+        'uuid': const Uuid().v4(),
         'version': [1, currentRev, 0],
       });
     }
@@ -583,8 +575,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       'modules': modules,
       'metadata': {
         'authors': ['BedrockSmith User'],
-        'bundled_behavior_packs': behaviorPacks.map((p) => p.name).toList(),
-        'bundled_resource_packs': resourcePacks.map((p) => p.name).toList(),
+        'bundled_behavior_packs_order': behaviorPacks
+            .map((p) => '#${p.originalPriority ?? '?'}: ${p.name}')
+            .toList(),
+        'bundled_resource_packs_order': resourcePacks
+            .map((p) => '#${p.originalPriority ?? '?'}: ${p.name}')
+            .toList(),
       }
     };
 
@@ -648,7 +644,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               ),
               const SizedBox(height: 8),
               Text(
-                'Take screenshots of your ${isRP ? "Resource Packs" : "Behavior Packs"} tab in Minecraft and tap below to scan.',
+                'Select screenshots of your Minecraft ${isRP ? "Resource Packs" : "Behavior Packs"} tab.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.white54, fontSize: 13),
               ),
@@ -663,57 +659,42 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       itemCount: list.length,
       itemBuilder: (context, index) {
         final addon = list[index];
-        return Dismissible(
-          key: Key(addon.id),
-          direction: DismissDirection.endToStart,
-          background: Container(
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 20.0),
-            color: Colors.redAccent.withOpacity(0.8),
-            child: const Icon(Icons.delete, color: Colors.white),
-          ),
-          onDismissed: (_) {
-            setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
-            _persistState();
-          },
-          child: Card(
-            color: const Color(0xFF1E232B),
-            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-            child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-                child: Icon(
-                  addon.type == PackType.resource ? Icons.brush : Icons.smart_toy,
-                  color: Colors.white,
-                  size: 16,
-                ),
+        return Card(
+          color: const Color(0xFF1E232B),
+          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+          child: ListTile(
+            leading: CircleAvatar(
+              backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
+              child: Text(
+                addon.originalPriority != null ? '#${addon.originalPriority}' : '${index + 1}',
+                style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
               ),
-              title: Row(
-                children: [
-                  Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
-                  if (addon.isTrinketBridge)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF107C41).withOpacity(0.3),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
+            ),
+            title: Row(
+              children: [
+                Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
+                if (addon.isTrinketBridge)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF107C41).withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(4),
                     ),
-                ],
-              ),
-              subtitle: Text(
-                '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion}',
-                style: const TextStyle(fontSize: 12, color: Colors.white70),
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white38, size: 18),
-                tooltip: 'Remove',
-                onPressed: () {
-                  setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
-                  _persistState();
-                },
-              ),
+                    child: const Text('CORE / BRIDGE', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
+                  ),
+              ],
+            ),
+            subtitle: Text(
+              '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion}',
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white38, size: 18),
+              tooltip: 'Remove',
+              onPressed: () {
+                setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
+                _persistState();
+              },
             ),
           ),
         );
@@ -769,7 +750,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
             : const Icon(Icons.add_photo_alternate),
         label: Text(
           _isProcessing
-              ? 'Analyzing...'
+              ? 'Scanning...'
               : (_tabController.index == 0 ? 'Scan Resource Packs' : 'Scan Behavior Packs'),
         ),
         onPressed: _isProcessing
