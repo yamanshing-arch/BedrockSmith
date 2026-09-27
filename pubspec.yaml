@@ -1,5 +1,5 @@
 name: bedrock_smith
-description: "Minecraft Bedrock Add-on & Safety Patch Manager"
+description: "BedrockSmith: Smart Minecraft Add-on Scanner & Modpack Builder"
 publish_to: "none"
 version: 1.0.0+1
 
@@ -9,10 +9,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  permission_handler: ^11.3.1
-  path_provider: ^2.1.4
-  file_picker: ^8.1.2
+  image_picker: ^1.1.2
+  google_mlkit_text_recognition: ^0.14.0
   http: ^1.2.2
+  archive: ^3.6.1
+  uuid: ^4.5.1
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   flutter_test:
