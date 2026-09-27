@@ -47,7 +47,7 @@ jobs:
 
   build-windows:
     name: Build Windows Desktop EXE
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -66,6 +66,8 @@ jobs:
           flutter pub get
 
       - name: Build Standalone Windows Bundle
+        env:
+          CMAKE_GENERATOR: "Visual Studio 17 2022"
         run: flutter build windows --release
 
       - name: Package Windows Bundle into ZIP
