@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Java Runtime
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -67,7 +67,7 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
           files: |
             ./release-artifacts/app-release.apk
-          name: BedrockSmith Release ${{ github.ref_name }}
+          name: BedrockSmith Release ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
           draft: false
           prerelease: false
           generate_release_notes: true
