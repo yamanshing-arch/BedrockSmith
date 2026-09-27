@@ -35,7 +35,7 @@ class BedrockSmithApp extends StatelessWidget {
 
 class AddonEntry {
   final String id;
-  final String name;
+  String name;
   String currentVersion;
   String? latestVersion;
   bool updateAvailable;
@@ -89,6 +89,42 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
   int _bundleRevision = 1;
   String _bundleName = 'ATM_Mega_Pack';
 
+  // Strict list of Minecraft UI elements, menu items, and OCR noise to discard
+  static const Set<String> _ignoredKeywords = {
+    'GENERAL',
+    'ADVANCED',
+    'MULTIPLAYER',
+    'CHEATS',
+    'EXPERIMENT',
+    'EXPERIMENTS',
+    'CEXPERIMENT',
+    'RESOURCE PACKS',
+    'RIESOURCE PACKS',
+    'BEHAVIOUR PACKS',
+    'BEHAVIOR PACKS',
+    'MY PACKS',
+    'ACTIVE',
+    'AVAILABLE',
+    'DEACTIVATE',
+    'SETTINGS',
+    'GLOBAL RESOURCES',
+    'STORAGE',
+    'MINECRAFT',
+    'REALMS',
+    'EDIT',
+    'REMOVE',
+    'IEMOVE',
+    'SELECT',
+    'BACK',
+    'PLAY',
+    'WORLD',
+    'CREATE',
+    'CANCEL',
+    'DONE',
+    'TEXTURES',
+    'DEFAULT',
+  };
+
   @override
   void initState() {
     super.initState();
@@ -123,23 +159,39 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     await prefs.setString('atm_bundle_name', _bundleName);
   }
 
-  Future<void> _scanScreenshot() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-    if (image == null) return;
+  Future<void> _scanScreenshots() async {
+    // Allows selecting multiple screenshots in one go
+    final List<XFile> images = await _picker.pickMultiImage();
+    if (images.isEmpty) return;
 
     setState(() => _isProcessing = true);
 
     try {
-      final inputImage = InputImage.fromFilePath(image.path);
       final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
-      final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
+      int totalFound = 0;
+
+      for (final image in images) {
+        final inputImage = InputImage.fromFilePath(image.path);
+        final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
+        totalFound += _parseExtractedText(recognizedText.text);
+      }
+
       await textRecognizer.close();
 
-      _parseExtractedText(recognizedText.text);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(totalFound > 0
+                ? 'Processed ${images.length} screenshot(s) • Added $totalFound add-on(s)!'
+                : 'Scanned ${images.length} image(s), but found no new valid add-ons.'),
+            backgroundColor: const Color(0xFF107C41),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error analyzing screenshot: $e')),
+          SnackBar(content: Text('Error analyzing screenshots: $e')),
         );
       }
     } finally {
@@ -149,38 +201,51 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     }
   }
 
-  void _parseExtractedText(String rawText) {
+  int _parseExtractedText(String rawText) {
     final lines = rawText
         .split('\n')
         .map((l) => l.trim())
         .where((l) => l.isNotEmpty)
         .toList();
+
     final List<AddonEntry> newAddons = [];
 
-    final systemKeywords = [
-      'SETTINGS', 'GLOBAL RESOURCES', 'ACTIVE', 'MY PACKS', 'DEACTIVATE',
-      'BEHAVIOR PACKS', 'RESOURCE PACKS', 'STORAGE', 'AVAILABLE', 'MINECRAFT',
-      'REALMS', 'EDIT'
-    ];
-
     for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
+      var line = lines[i];
+
+      // Discard stray punctuation or single characters from OCR noise
+      line = line.replaceAll(RegExp(r'^[\]\[|/\\•\-_]+\s*'), '').trim();
       final upper = line.toUpperCase();
 
-      if (systemKeywords.any((kw) => upper.contains(kw)) || line.length < 3) {
+      // Check against UI blocklist or line length
+      if (line.length < 3 || _ignoredKeywords.contains(upper)) {
         continue;
       }
 
+      // Skip lines that match exact menu items even with trailing numbers/symbols
+      bool isBlocked = false;
+      for (final kw in _ignoredKeywords) {
+        if (upper == kw || upper == '$kw S' || upper.startsWith('$kw ')) {
+          if (!upper.contains('DELIGHT') && !upper.contains('WAILA') && !upper.contains('LIGHT')) {
+            isBlocked = true;
+            break;
+          }
+        }
+      }
+      if (isBlocked) continue;
+
+      // Extract version if present
       final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(line);
       String foundVersion = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
 
       String addonName = line;
-      if (versionMatch != null && line.length <= 10 && newAddons.isNotEmpty) {
+      if (versionMatch != null && line.length <= 8) {
         continue;
       }
 
+      // Clean the name of version tags and bracket artifacts
       addonName = addonName.replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?'), '').trim();
-      if (addonName.isEmpty) continue;
+      if (addonName.isEmpty || addonName.length < 3) continue;
 
       final isBridge = addonName.toLowerCase().contains('trinket') ||
           addonName.toLowerCase().contains('curios') ||
@@ -188,33 +253,30 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
           addonName.toLowerCase().contains('api') ||
           addonName.toLowerCase().contains('core');
 
-      if (!_detectedAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase()) &&
-          !newAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase())) {
+      final alreadyExists = _detectedAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase()) ||
+          newAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase());
+
+      if (!alreadyExists) {
         newAddons.add(AddonEntry(
           id: const Uuid().v4(),
           name: addonName,
           currentVersion: foundVersion,
           latestVersion: 'v1.4.0',
-          updateAvailable: true,
+          updateAvailable: false,
           inMegaPack: true,
           isTrinketBridge: isBridge,
         ));
       }
     }
 
-    setState(() {
-      _detectedAddons.addAll(newAddons);
-    });
-    _persistState();
-
-    if (newAddons.isNotEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Added ${newAddons.length} new add-ons to your library!'),
-          backgroundColor: const Color(0xFF107C41),
-        ),
-      );
+    if (newAddons.isNotEmpty) {
+      setState(() {
+        _detectedAddons.addAll(newAddons);
+      });
+      _persistState();
     }
+
+    return newAddons.length;
   }
 
   void _autoSortMegaPackOrder() {
@@ -487,7 +549,11 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
       ],
       'metadata': {
         'authors': ['BedrockSmith User'],
-        'bundled_addons_order': packs.asMap().entries.map((e) => '#${e.key + 1}: ${e.value.name} (${e.value.currentVersion})').toList(),
+        'bundled_addons_order': packs
+            .asMap()
+            .entries
+            .map((e) => '#${e.key + 1}: ${e.value.name} (${e.value.currentVersion})')
+            .toList(),
       }
     };
 
@@ -554,8 +620,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
               onPressed: _showManageMegaPackSheet,
             ),
             IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.white54),
-              tooltip: 'Clear Library',
+              icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
+              tooltip: 'Clear All',
               onPressed: () {
                 setState(() => _detectedAddons.clear());
                 _persistState();
@@ -569,8 +635,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
         icon: _isProcessing
             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
             : const Icon(Icons.add_photo_alternate),
-        label: Text(_isProcessing ? 'Analyzing...' : 'Scan Screenshot'),
-        onPressed: _isProcessing ? null : _scanScreenshot,
+        label: Text(_isProcessing ? 'Analyzing...' : 'Scan Screenshots'),
+        onPressed: _isProcessing ? null : _scanScreenshots,
       ),
       bottomNavigationBar: _detectedAddons.isNotEmpty
           ? Container(
@@ -605,7 +671,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Take screenshots of your Minecraft Add-ons list and tap below to scan and start building your Mega-Pack.',
+                      'Tap below to pick multiple screenshots of your Add-ons list. UI buttons and menus are filtered automatically.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.white54, fontSize: 13),
                     ),
@@ -618,62 +684,58 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
               itemCount: _detectedAddons.length,
               itemBuilder: (context, index) {
                 final addon = _detectedAddons[index];
-                return Card(
-                  color: const Color(0xFF1E232B),
-                  margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-                      child: Icon(
-                        addon.inMegaPack ? Icons.check : Icons.remove,
-                        color: Colors.white,
-                        size: 18,
+                return Dismissible(
+                  key: Key(addon.id),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 20.0),
+                    color: Colors.redAccent.withOpacity(0.8),
+                    child: const Icon(Icons.delete, color: Colors.white),
+                  ),
+                  onDismissed: (_) {
+                    setState(() => _detectedAddons.removeAt(index));
+                    _persistState();
+                  },
+                  child: Card(
+                    color: const Color(0xFF1E232B),
+                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
+                        child: Icon(
+                          addon.inMegaPack ? Icons.check : Icons.remove,
+                          color: Colors.white,
+                          size: 18,
+                        ),
+                      ),
+                      title: Row(
+                        children: [
+                          Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
+                          if (addon.isTrinketBridge)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF107C41).withOpacity(0.3),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
+                            ),
+                        ],
+                      ),
+                      subtitle: Text(
+                        'Current: ${addon.currentVersion}',
+                        style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white38, size: 18),
+                        tooltip: 'Remove',
+                        onPressed: () {
+                          setState(() => _detectedAddons.removeAt(index));
+                          _persistState();
+                        },
                       ),
                     ),
-                    title: Row(
-                      children: [
-                        Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
-                        if (addon.isTrinketBridge)
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF107C41).withOpacity(0.3),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
-                          ),
-                      ],
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Current: ${addon.currentVersion}', style: const TextStyle(fontSize: 12, color: Colors.white70)),
-                        if (addon.updateAvailable)
-                          Text(
-                            'Update Available: ${addon.latestVersion}',
-                            style: const TextStyle(fontSize: 12, color: Colors.amberAccent, fontWeight: FontWeight.bold),
-                          ),
-                      ],
-                    ),
-                    trailing: addon.updateAvailable
-                        ? ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF107C41),
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            ),
-                            onPressed: () {
-                              setState(() {
-                                addon.currentVersion = addon.latestVersion!;
-                                addon.updateAvailable = false;
-                              });
-                              _persistState();
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Updated ${addon.name}!')),
-                              );
-                            },
-                            child: const Text('UPDATE', style: TextStyle(fontSize: 11)),
-                          )
-                        : const Icon(Icons.check_circle, color: Color(0xFF52B788), size: 20),
                   ),
                 );
               },
