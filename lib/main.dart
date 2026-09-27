@@ -95,7 +95,18 @@ class _WorldManagerDashboardState extends State<WorldManagerDashboard>
   String _getBaseMojangPath() {
     if (_customPath != null) return _customPath!;
     if (Platform.isAndroid) {
-      return '/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/games/com.mojang';
+      // 1. Check legacy external path (standard for Minecraft External storage)
+      const legacyPath = '/storage/emulated/0/games/com.mojang';
+      if (Directory(legacyPath).existsSync()) {
+        return legacyPath;
+      }
+      // 2. Check scoped Android/data path
+      const modernPath = '/storage/emulated/0/Android/data/com.mojang.minecraftpe/files/games/com.mojang';
+      if (Directory(modernPath).existsSync()) {
+        return modernPath;
+      }
+      // Fallback
+      return legacyPath;
     } else if (Platform.isWindows) {
       final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
       return '$localAppData\\Packages\\Microsoft.MinecraftUWP_8wekyb3d8bbwe\\LocalState\\games\\com.mojang';
@@ -140,6 +151,10 @@ class _WorldManagerDashboardState extends State<WorldManagerDashboard>
       if (_worlds.isNotEmpty) {
         _selectedWorld = _worlds.first;
         _inspectWorldPacks();
+      } else {
+        _selectedWorld = null;
+        _activeBehaviorPacks = [];
+        _activeResourcePacks = [];
       }
     });
   }
