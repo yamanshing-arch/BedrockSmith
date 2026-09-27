@@ -29,7 +29,7 @@ jobs:
 
       - name: Scaffold Native Android Platforms
         run: |
-          flutter create --platforms=android --project-name bedrock_smith --force .
+          flutter create --platforms=android --project-name bedrock_smith .
           flutter pub get
 
       - name: Configure Android Manifest Permissions
