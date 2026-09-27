@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:archive/archive_io.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   runApp(const BedrockSmithApp());
@@ -107,7 +109,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v7');
+    final savedData = prefs.getString('saved_addons_v10');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -125,7 +127,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v7', encoded);
+    await prefs.setString('saved_addons_v10', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -162,7 +164,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         final label = targetType == PackType.resource ? 'Resource' : 'Behavior';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Cleanly detected $totalFound$label Pack(s) in priority sequence!'),
+            content: Text('Cleanly detected $totalFound $label Pack(s) in priority sequence!'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
@@ -181,13 +183,10 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   }
 
   int _processSpatialRecognition(RecognizedText recognized, PackType targetType, double imgWidth, double imgHeight) {
-    final List<AddonEntry> parsedPacks = [];
-
-    // Spatial boundaries isolating the pack names and numbers:
-    final minX = imgWidth * 0.33;
-    final maxX = imgWidth * 0.82;
+    final minX = imgWidth * 0.35;
+    final maxX = imgWidth * 0.80;
     final minY = imgHeight * 0.08;
-    final maxY = imgHeight * 0.88;
+    final maxY = imgHeight * 0.86;
 
     final blockedTerms = [
       'SETTINGS', 'GENERAL', 'ADVANCED', 'MULTIPLAYER', 'CHEATS', 'RESOURCE PACKS',
@@ -197,86 +196,75 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       'TOUCH', 'SUBSCRIPTION', 'REALMS', 'EDIT WORLD', 'ACHIEVEMENTS', 'SAME ENTITY'
     ];
 
+    final List<TextLine> validLines = [];
     for (final block in recognized.blocks) {
       for (final line in block.lines) {
         final box = line.boundingBox;
-
         if (box.left < minX || box.right > maxX || box.top < minY || box.bottom > maxY) {
           continue;
         }
 
-        var text = line.text.trim();
-        final upper = text.toUpperCase();
+        final upper = line.text.trim().toUpperCase();
+        if (upper.length < 2 || RegExp(r'^[^a-zA-Z0-9]+$').hasMatch(upper)) continue;
+        if (blockedTerms.any((term) => upper.contains(term))) continue;
+        if (line.text.split(' ').length > 8 || line.text.endsWith('.')) continue;
 
-        if (text.length < 3 || RegExp(r'^[^a-zA-Z0-9]+$').hasMatch(text)) {
-          continue;
+        validLines.add(line);
+      }
+    }
+
+    validLines.sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+
+    final List<AddonEntry> parsedPacks = [];
+    AddonEntry? currentPack;
+
+    for (final line in validLines) {
+      var raw = line.text.trim();
+      final priorityMatch = RegExp(r'^(?:::|#|:|\.)?\s*(\d{1,3})\b').firstMatch(raw);
+
+      if (priorityMatch != null) {
+        final pNum = int.tryParse(priorityMatch.group(1)!);
+        raw = raw.replaceFirst(priorityMatch.group(0)!, '').trim();
+        raw = _cleanRawTitle(raw);
+
+        if (raw.isNotEmpty) {
+          final entry = _createEntry(raw, pNum, targetType);
+          parsedPacks.add(entry);
+          currentPack = entry;
         }
+      } else {
+        raw = _cleanRawTitle(raw);
+        if (raw.isEmpty) continue;
+        if (raw.length <= 4 && !raw.contains('Add') && !raw.contains('Pack')) continue;
 
-        if (blockedTerms.any((term) => upper.contains(term))) {
-          continue;
-        }
-
-        if (text.split(' ').length > 8 || text.endsWith('.')) {
-          continue;
-        }
-
-        // Priority extraction (#1 - #99)
-        int? priorityNumber;
-        final priorityMatch = RegExp(r'^(?:::|#|:)?\s*(\d{1,3})\b').firstMatch(text);
-        if (priorityMatch != null) {
-          priorityNumber = int.tryParse(priorityMatch.group(1)!);
-          text = text.replaceFirst(priorityMatch.group(0)!, '').trim();
-        }
-
-        text = text.replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?]+\s*'), '').trim();
-        if (text.length < 3) continue;
-
-        // Version extraction
-        final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(text);
-        String version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
-
-        var cleanTitle = text
-            .replaceAll(RegExp(r'\[v?\d+\.\d+(\.\d+)?\]', caseSensitive: false), '')
-            .replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?', caseSensitive: false), '')
-            .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•\s]+'), '')
-            .replaceAll(RegExp(r'[\]\[]+'), '')
-            .trim();
-
-        if (cleanTitle.length < 3) continue;
-
-        final lowerTitle = cleanTitle.toLowerCase();
-        final isBridge = lowerTitle.contains('trinket') ||
-            lowerTitle.contains('curios') ||
-            lowerTitle.contains('amulet') ||
-            lowerTitle.contains('backpack') ||
-            lowerTitle.contains('neck') ||
-            lowerTitle.contains('api') ||
-            lowerTitle.contains('core');
-
-        final exists = _detectedAddons.any(
-              (a) => a.name.toLowerCase() == lowerTitle && a.type == targetType,
-            ) ||
-            parsedPacks.any(
-              (a) => a.name.toLowerCase() == lowerTitle && a.type == targetType,
-            );
-
-        if (!exists) {
-          parsedPacks.add(AddonEntry(
-            id: const Uuid().v4(),
-            name: cleanTitle,
-            currentVersion: version,
-            type: targetType,
-            originalPriority: priorityNumber,
-            inMegaPack: true,
-            isTrinketBridge: isBridge,
-          ));
+        if (currentPack != null &&
+            !currentPack.name.endsWith(raw) &&
+            !currentPack.name.contains(raw)) {
+          currentPack.name = '${currentPack.name} $raw'.trim();
+        } else {
+          final entry = _createEntry(raw, null, targetType);
+          parsedPacks.add(entry);
+          currentPack = entry;
         }
       }
     }
 
-    if (parsedPacks.isNotEmpty) {
+    int newlyAdded = 0;
+    for (final pack in parsedPacks) {
+      pack.name = _permanentMojanglesEngine(pack.name);
+
+      final exists = _detectedAddons.any(
+        (a) => a.name.toLowerCase() == pack.name.toLowerCase() && a.type == targetType,
+      );
+
+      if (!exists && pack.name.length >= 3) {
+        _detectedAddons.add(pack);
+        newlyAdded++;
+      }
+    }
+
+    if (newlyAdded > 0) {
       setState(() {
-        _detectedAddons.addAll(parsedPacks);
         _detectedAddons.sort((a, b) {
           if (a.originalPriority != null && b.originalPriority != null) {
             return a.originalPriority!.compareTo(b.originalPriority!);
@@ -289,7 +277,145 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       _persistState();
     }
 
-    return parsedPacks.length;
+    return newlyAdded;
+  }
+
+  String _cleanRawTitle(String text) {
+    return text
+        .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?.]+\s*'), '')
+        .replaceAll(RegExp(r'[\]\[]+'), '')
+        .trim();
+  }
+
+  String _permanentMojanglesEngine(String rawTitle) {
+    final words = rawTitle.split(' ');
+    final correctedWords = words.map((word) {
+      var w = word;
+      if (RegExp(r'^Oravestone', caseSensitive: false).hasMatch(w)) {
+        w = w.replaceFirst(RegExp(r'^O', caseSensitive: false), 'G');
+      }
+      if (RegExp(r'^Foison', caseSensitive: false).hasMatch(w)) {
+        w = w.replaceFirst(RegExp(r'^F', caseSensitive: false), 'P');
+      }
+      if (RegExp(r'^Ouide', caseSensitive: false).hasMatch(w)) {
+        w = w.replaceFirst(RegExp(r'^Oui', caseSensitive: false), 'Gui');
+      }
+      if (RegExp(r'^Riotten', caseSensitive: false).hasMatch(w)) {
+        w = 'Rotten';
+      }
+      return w;
+    }).toList();
+
+    return correctedWords.join(' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  AddonEntry _createEntry(String title, int? priority, PackType targetType) {
+    final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(title);
+    final version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
+
+    final lower = title.toLowerCase();
+    final isBridge = lower.contains('trinket') ||
+        lower.contains('curios') ||
+        lower.contains('amulet') ||
+        lower.contains('backpack') ||
+        lower.contains('neck') ||
+        lower.contains('api') ||
+        lower.contains('core');
+
+    return AddonEntry(
+      id: const Uuid().v4(),
+      name: title,
+      currentVersion: version,
+      type: targetType,
+      originalPriority: priority,
+      inMegaPack: true,
+      isTrinketBridge: isBridge,
+    );
+  }
+
+  Future<void> _launchGeminiSupport() async {
+    final rpPacks = _detectedAddons.where((a) => a.type == PackType.resource).toList();
+    final bpPacks = _detectedAddons.where((a) => a.type == PackType.behavior).toList();
+
+    // Create a diagnostic summary of the app's current state
+    final buffer = StringBuffer();
+    buffer.writeln('=== BedrockSmith Support Report ===');
+    buffer.writeln('App Version: v1.0.0');
+    buffer.writeln('Bundle UUID: ${_bundleMasterUuid ?? "None"}');
+    buffer.writeln('Bundle Revision: $_bundleRevision');
+    buffer.writeln('Total Detected Add-ons: ${_detectedAddons.length}');
+    buffer.writeln('\n-- Resource Packs (${rpPacks.length}) --');
+    for (final p in rpPacks) {
+      buffer.writeln('#${p.originalPriority ?? "?"} ${p.name} (${p.currentVersion})');
+    }
+    buffer.writeln('\n-- Behavior Packs (${bpPacks.length}) --');
+    for (final p in bpPacks) {
+      buffer.writeln('#${p.originalPriority ?? "?"} ${p.name} (${p.currentVersion})');
+    }
+
+    await Clipboard.setData(ClipboardData(text: buffer.toString()));
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Diagnostics copied to clipboard! Paste it into Gemini.'),
+          backgroundColor: Color(0xFF107C41),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    }
+
+    final Uri url = Uri.parse('https://gemini.google.com/');
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _showEditTitleDialog(AddonEntry addon) {
+    final titleController = TextEditingController(text: addon.name);
+    final versionController = TextEditingController(text: addon.currentVersion);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E232B),
+        title: const Text('Edit Add-on Details', style: TextStyle(color: Color(0xFF52B788))),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: titleController,
+              decoration: const InputDecoration(labelText: 'Add-on Title', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: versionController,
+              decoration: const InputDecoration(labelText: 'Version', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.pop(ctx),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41)),
+            child: const Text('Save'),
+            onPressed: () {
+              setState(() {
+                addon.name = titleController.text.trim();
+                addon.currentVersion = versionController.text.trim();
+              });
+              _persistState();
+              Navigator.pop(ctx);
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   void _showManageMegaPackSheet() {
@@ -505,7 +631,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Bundling ${activeRPs.length} Resource Pack(s) and${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
+              'Bundling ${activeRPs.length} Resource Pack(s) and ${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
               style: const TextStyle(fontSize: 13, color: Colors.white70),
             ),
             const SizedBox(height: 12),
@@ -663,6 +789,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           color: const Color(0xFF1E232B),
           margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: ListTile(
+            onTap: () => _showEditTitleDialog(addon),
             leading: CircleAvatar(
               backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
               child: Text(
@@ -672,7 +799,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
             ),
             title: Row(
               children: [
-                Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
+                Expanded(
+                  child: Text(
+                    addon.name,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
                 if (addon.isTrinketBridge)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -685,7 +817,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               ],
             ),
             subtitle: Text(
-              '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion}',
+              '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion} • Tap to edit',
               style: const TextStyle(fontSize: 12, color: Colors.white70),
             ),
             trailing: IconButton(
@@ -722,6 +854,11 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
+            tooltip: 'Ask Gemini Support',
+            onPressed: _launchGeminiSupport,
+          ),
           if (_detectedAddons.isNotEmpty) ...[
             IconButton(
               icon: Badge(

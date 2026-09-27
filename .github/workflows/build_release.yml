@@ -44,12 +44,12 @@ jobs:
           # 2. Enable MultiDex in defaultConfig
           sed -i '/defaultConfig {/a \        multiDexEnabled true' android/app/build.gradle || true
 
-          # 3. Disable R8 shrinking so ML Kit classes are preserved cleanly
+          # 3. Disable R8 shrinking
           sed -i '/buildTypes {/,/}/ s/signingConfig/minifyEnabled false\n            shrinkResources false\n            signingConfig/' android/app/build.gradle || true
 
-      - name: Configure Android Manifest Permissions
+      - name: Configure Android Manifest Permissions & Queries
         run: |
-          sed -i '/<application/i \    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>' android/app/src/main/AndroidManifest.xml
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>\n    <queries>\n        <intent>\n            <action android:name="android.intent.action.VIEW" />\n            <data android:scheme="https" />\n        </intent>\n    </queries>' android/app/src/main/AndroidManifest.xml
 
       - name: Build Standalone APK
         run: flutter build apk --release
