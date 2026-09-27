@@ -33,12 +33,19 @@ jobs:
           flutter pub get
           if [ -f assets/icon.png ]; then dart run flutter_launcher_icons; fi
 
-      - name: Patch Android SDK for ML Kit
+      - name: Patch Android Build Settings for ML Kit & R8
         run: |
+          # 1. Update SDK levels
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
           sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle || true
           sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 34/g' android/app/build.gradle || true
+
+          # 2. Enable MultiDex in defaultConfig
+          sed -i '/defaultConfig {/a \        multiDexEnabled true' android/app/build.gradle || true
+
+          # 3. Disable R8 shrinking so ML Kit classes are preserved cleanly
+          sed -i '/buildTypes {/,/}/ s/signingConfig/minifyEnabled false\n            shrinkResources false\n            signingConfig/' android/app/build.gradle || true
 
       - name: Configure Android Manifest Permissions
         run: |
