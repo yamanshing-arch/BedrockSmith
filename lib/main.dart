@@ -11,6 +11,8 @@ void main() {
   runApp(const BedrockSmithApp());
 }
 
+enum PackType { resource, behavior }
+
 class BedrockSmithApp extends StatelessWidget {
   const BedrockSmithApp({super.key});
 
@@ -37,8 +39,7 @@ class AddonEntry {
   final String id;
   String name;
   String currentVersion;
-  String? latestVersion;
-  bool updateAvailable;
+  PackType type;
   bool inMegaPack;
   bool isTrinketBridge;
 
@@ -46,8 +47,7 @@ class AddonEntry {
     required this.id,
     required this.name,
     required this.currentVersion,
-    this.latestVersion,
-    this.updateAvailable = false,
+    required this.type,
     this.inMegaPack = true,
     this.isTrinketBridge = false,
   });
@@ -56,8 +56,7 @@ class AddonEntry {
         'id': id,
         'name': name,
         'currentVersion': currentVersion,
-        'latestVersion': latestVersion,
-        'updateAvailable': updateAvailable,
+        'type': type.name,
         'inMegaPack': inMegaPack,
         'isTrinketBridge': isTrinketBridge,
       };
@@ -66,8 +65,7 @@ class AddonEntry {
         id: map['id'] ?? const Uuid().v4(),
         name: map['name'] ?? '',
         currentVersion: map['currentVersion'] ?? 'v1.0.0',
-        latestVersion: map['latestVersion'],
-        updateAvailable: map['updateAvailable'] ?? false,
+        type: map['type'] == 'behavior' ? PackType.behavior : PackType.resource,
         inMegaPack: map['inMegaPack'] ?? true,
         isTrinketBridge: map['isTrinketBridge'] ?? false,
       );
@@ -80,7 +78,8 @@ class AddonScannerHome extends StatefulWidget {
   State<AddonScannerHome> createState() => _AddonScannerHomeState();
 }
 
-class _AddonScannerHomeState extends State<AddonScannerHome> {
+class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
   List<AddonEntry> _detectedAddons = [];
   bool _isProcessing = false;
   final ImagePicker _picker = ImagePicker();
@@ -89,7 +88,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
   int _bundleRevision = 1;
   String _bundleName = 'ATM_Mega_Pack';
 
-  // Strict list of Minecraft UI elements, menu items, and OCR noise to discard
   static const Set<String> _ignoredKeywords = {
     'GENERAL',
     'ADVANCED',
@@ -128,12 +126,19 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     _loadState();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_list');
+    final savedData = prefs.getString('saved_addons_list_v2');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -151,7 +156,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_list', encoded);
+    await prefs.setString('saved_addons_list_v2', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -159,8 +164,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     await prefs.setString('atm_bundle_name', _bundleName);
   }
 
-  Future<void> _scanScreenshots() async {
-    // Allows selecting multiple screenshots in one go
+  Future<void> _scanScreenshots(PackType targetType) async {
     final List<XFile> images = await _picker.pickMultiImage();
     if (images.isEmpty) return;
 
@@ -173,17 +177,18 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
       for (final image in images) {
         final inputImage = InputImage.fromFilePath(image.path);
         final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
-        totalFound += _parseExtractedText(recognizedText.text);
+        totalFound += _parseExtractedText(recognizedText.text, targetType);
       }
 
       await textRecognizer.close();
 
       if (mounted) {
+        final label = targetType == PackType.resource ? 'Resource Pack' : 'Behavior Pack';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(totalFound > 0
-                ? 'Processed ${images.length} screenshot(s) • Added $totalFound add-on(s)!'
-                : 'Scanned ${images.length} image(s), but found no new valid add-ons.'),
+                ? 'Added $totalFound$label(s) to your collection!'
+                : 'Scanned images, but no new $label titles were recognized.'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
@@ -201,7 +206,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     }
   }
 
-  int _parseExtractedText(String rawText) {
+  int _parseExtractedText(String rawText, PackType targetType) {
     final lines = rawText
         .split('\n')
         .map((l) => l.trim())
@@ -212,17 +217,13 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
 
     for (int i = 0; i < lines.length; i++) {
       var line = lines[i];
-
-      // Discard stray punctuation or single characters from OCR noise
       line = line.replaceAll(RegExp(r'^[\]\[|/\\•\-_]+\s*'), '').trim();
       final upper = line.toUpperCase();
 
-      // Check against UI blocklist or line length
       if (line.length < 3 || _ignoredKeywords.contains(upper)) {
         continue;
       }
 
-      // Skip lines that match exact menu items even with trailing numbers/symbols
       bool isBlocked = false;
       for (final kw in _ignoredKeywords) {
         if (upper == kw || upper == '$kw S' || upper.startsWith('$kw ')) {
@@ -234,7 +235,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
       }
       if (isBlocked) continue;
 
-      // Extract version if present
       final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(line);
       String foundVersion = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
 
@@ -243,9 +243,16 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
         continue;
       }
 
-      // Clean the name of version tags and bracket artifacts
       addonName = addonName.replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?'), '').trim();
       if (addonName.isEmpty || addonName.length < 3) continue;
+
+      // Deduce pack type preference if explicit in name, otherwise respect the tab
+      PackType assignedType = targetType;
+      if (addonName.toLowerCase().endsWith(' rp') || addonName.toLowerCase().contains('[rf]')) {
+        assignedType = PackType.resource;
+      } else if (addonName.toLowerCase().endsWith(' bp')) {
+        assignedType = PackType.behavior;
+      }
 
       final isBridge = addonName.toLowerCase().contains('trinket') ||
           addonName.toLowerCase().contains('curios') ||
@@ -253,16 +260,19 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
           addonName.toLowerCase().contains('api') ||
           addonName.toLowerCase().contains('core');
 
-      final alreadyExists = _detectedAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase()) ||
-          newAddons.any((a) => a.name.toLowerCase() == addonName.toLowerCase());
+      final alreadyExists = _detectedAddons.any(
+            (a) => a.name.toLowerCase() == addonName.toLowerCase() && a.type == assignedType,
+          ) ||
+          newAddons.any(
+            (a) => a.name.toLowerCase() == addonName.toLowerCase() && a.type == assignedType,
+          );
 
       if (!alreadyExists) {
         newAddons.add(AddonEntry(
           id: const Uuid().v4(),
           name: addonName,
           currentVersion: foundVersion,
-          latestVersion: 'v1.4.0',
-          updateAvailable: false,
+          type: assignedType,
           inMegaPack: true,
           isTrinketBridge: isBridge,
         ));
@@ -279,20 +289,25 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     return newAddons.length;
   }
 
-  void _autoSortMegaPackOrder() {
+  void _autoSortSectionOrder(PackType type) {
     setState(() {
-      _detectedAddons.sort((a, b) {
+      final sectionItems = _detectedAddons.where((a) => a.type == type).toList();
+      final otherItems = _detectedAddons.where((a) => a.type != type).toList();
+
+      sectionItems.sort((a, b) {
         if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
         if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
+
+      _detectedAddons = [...sectionItems, ...otherItems];
     });
     _persistState();
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Auto-sorted by priority! (Trinket & Base bridges first)'),
-        backgroundColor: Color(0xFF107C41),
+      SnackBar(
+        content: Text('Auto-sorted ${type == PackType.resource ? "Resource" : "Behavior"} Packs!'),
+        backgroundColor: const Color(0xFF107C41),
       ),
     );
   }
@@ -307,11 +322,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
       ),
       builder: (ctx) => StatefulBuilder(
         builder: (context, setModalState) {
-          final megaPackItems = _detectedAddons.where((a) => a.inMegaPack).toList();
+          final rpList = _detectedAddons.where((a) => a.type == PackType.resource && a.inMegaPack).toList();
+          final bpList = _detectedAddons.where((a) => a.type == PackType.behavior && a.inMegaPack).toList();
 
           return DraggableScrollableSheet(
             expand: false,
-            initialChildSize: 0.75,
+            initialChildSize: 0.8,
             maxChildSize: 0.95,
             minChildSize: 0.4,
             builder: (_, scrollController) => Column(
@@ -325,12 +341,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Mega-Pack Load Order',
+                            'Mega-Pack Bundler (RP + BP)',
                             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                           Text(
-                            '${megaPackItems.length} active add-ons • Hold & drag to reorder',
-                            style: const TextStyle(color: Colors.white54, fontSize: 12),
+                            '${rpList.length} Resource Packs • ${bpList.length} Behavior Packs',
+                            style: const TextStyle(color: Color(0xFF52B788), fontSize: 12),
                           ),
                         ],
                       ),
@@ -341,106 +357,23 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
                     ],
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Color(0xFF52B788)),
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                      ),
-                      icon: const Icon(Icons.auto_awesome, color: Color(0xFF52B788), size: 16),
-                      label: const Text(
-                        'AUTO-SORT LOAD PRIORITY',
-                        style: TextStyle(color: Color(0xFF52B788), fontSize: 12, fontWeight: FontWeight.bold),
-                      ),
-                      onPressed: () {
-                        _autoSortMegaPackOrder();
-                        setModalState(() {});
-                      },
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
                 const Divider(height: 1, color: Colors.white24),
                 Expanded(
-                  child: ReorderableListView.builder(
-                    itemCount: _detectedAddons.length,
-                    onReorder: (oldIndex, newIndex) {
-                      setState(() {
-                        if (newIndex > oldIndex) newIndex -= 1;
-                        final item = _detectedAddons.removeAt(oldIndex);
-                        _detectedAddons.insert(newIndex, item);
-                      });
-                      setModalState(() {});
-                      _persistState();
-                    },
-                    itemBuilder: (context, index) {
-                      final addon = _detectedAddons[index];
-                      return Container(
-                        key: ValueKey(addon.id),
-                        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1E232B),
-                          borderRadius: BorderRadius.circular(8),
-                          border: addon.isTrinketBridge
-                              ? Border.all(color: const Color(0xFF52B788).withOpacity(0.5))
-                              : null,
-                        ),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            radius: 14,
-                            backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-                            child: Text(
-                              '${index + 1}',
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
-                            ),
-                          ),
-                          title: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  addon.name,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    color: addon.inMegaPack ? Colors.white : Colors.white38,
-                                  ),
-                                ),
-                              ),
-                              if (addon.isTrinketBridge)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF107C41).withOpacity(0.3),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
-                                ),
-                            ],
-                          ),
-                          subtitle: Text(
-                            addon.currentVersion,
-                            style: const TextStyle(fontSize: 11, color: Colors.white54),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Switch(
-                                activeColor: const Color(0xFF107C41),
-                                value: addon.inMegaPack,
-                                onChanged: (val) {
-                                  setModalState(() => addon.inMegaPack = val);
-                                  setState(() {});
-                                  _persistState();
-                                },
-                              ),
-                              const Icon(Icons.drag_handle, color: Colors.white38),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
+                  child: ListView(
+                    controller: scrollController,
+                    children: [
+                      _buildReorderableSectionHeader('Behavior Packs (Scripts & Logic)', PackType.behavior, () {
+                        _autoSortSectionOrder(PackType.behavior);
+                        setModalState(() {});
+                      }),
+                      _buildSectionReorderList(PackType.behavior, setModalState),
+                      const SizedBox(height: 16),
+                      _buildReorderableSectionHeader('Resource Packs (Textures & Models)', PackType.resource, () {
+                        _autoSortSectionOrder(PackType.resource);
+                        setModalState(() {});
+                      }),
+                      _buildSectionReorderList(PackType.resource, setModalState),
+                    ],
                   ),
                 ),
                 Padding(
@@ -454,10 +387,10 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
                       ),
                       icon: const Icon(Icons.archive),
                       label: Text(
-                        _bundleMasterUuid != null ? 'EXPORT IN-PLACE UPDATE' : 'CREATE MEGA-PACK',
+                        _bundleMasterUuid != null ? 'EXPORT COMBINED UPDATE' : 'CREATE COMBINED MEGA-PACK',
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
-                      onPressed: megaPackItems.isEmpty
+                      onPressed: (rpList.isEmpty && bpList.isEmpty)
                           ? null
                           : () {
                               Navigator.pop(ctx);
@@ -474,8 +407,94 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     );
   }
 
+  Widget _buildReorderableSectionHeader(String title, PackType type, VoidCallback onSort) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)),
+          TextButton.icon(
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFF52B788)),
+            icon: const Icon(Icons.sort, size: 16),
+            label: const Text('Sort', style: TextStyle(fontSize: 12)),
+            onPressed: onSort,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionReorderList(PackType type, StateSetter setModalState) {
+    final list = _detectedAddons.where((a) => a.type == type).toList();
+    if (list.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        child: Text('No packs scanned for this section.', style: TextStyle(color: Colors.white30, fontSize: 12)),
+      );
+    }
+
+    return ReorderableListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: list.length,
+      onReorder: (oldIndex, newIndex) {
+        setState(() {
+          if (newIndex > oldIndex) newIndex -= 1;
+          final item = list.removeAt(oldIndex);
+          list.insert(newIndex, item);
+
+          // Update main state order
+          final otherItems = _detectedAddons.where((a) => a.type != type).toList();
+          _detectedAddons = type == PackType.behavior ? [...list, ...otherItems] : [...otherItems, ...list];
+        });
+        setModalState(() {});
+        _persistState();
+      },
+      itemBuilder: (context, index) {
+        final addon = list[index];
+        return Container(
+          key: ValueKey(addon.id),
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E232B),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: ListTile(
+            dense: true,
+            leading: CircleAvatar(
+              radius: 12,
+              backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
+              child: Text(
+                '${index + 1}',
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+            ),
+            title: Text(addon.name, style: TextStyle(fontSize: 13, color: addon.inMegaPack ? Colors.white : Colors.white38)),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Switch(
+                  activeColor: const Color(0xFF107C41),
+                  value: addon.inMegaPack,
+                  onChanged: (val) {
+                    setModalState(() => addon.inMegaPack = val);
+                    setState(() {});
+                    _persistState();
+                  },
+                ),
+                const Icon(Icons.drag_handle, color: Colors.white38, size: 18),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _showExportDialog() {
-    final activePacks = _detectedAddons.where((a) => a.inMegaPack).toList();
+    final activeRPs = _detectedAddons.where((a) => a.type == PackType.resource && a.inMegaPack).toList();
+    final activeBPs = _detectedAddons.where((a) => a.type == PackType.behavior && a.inMegaPack).toList();
     final nameController = TextEditingController(text: _bundleName);
     final isUpdate = _bundleMasterUuid != null;
 
@@ -492,9 +511,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              isUpdate
-                  ? 'Minecraft will replace the older version in-place, preserving load order without creating duplicates.'
-                  : 'Bundling ${activePacks.length} add-ons into one single-tap installer:',
+              'Bundles ${activeRPs.length} Resource Pack(s) and${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
               style: const TextStyle(fontSize: 13, color: Colors.white70),
             ),
             const SizedBox(height: 12),
@@ -518,7 +535,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
             label: Text(isUpdate ? 'Export Update' : 'Generate .mcaddon'),
             onPressed: () {
               Navigator.pop(ctx);
-              _generateAndExportMegaPack(nameController.text.trim(), activePacks);
+              _generateAndExportMegaPack(nameController.text.trim(), activeRPs, activeBPs);
             },
           ),
         ],
@@ -526,34 +543,48 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     );
   }
 
-  Future<void> _generateAndExportMegaPack(String packName, List<AddonEntry> packs) async {
+  Future<void> _generateAndExportMegaPack(
+    String packName,
+    List<AddonEntry> resourcePacks,
+    List<AddonEntry> behaviorPacks,
+  ) async {
     final masterUuid = _bundleMasterUuid ?? const Uuid().v4();
-    final moduleUuid = const Uuid().v4();
+    final bpModuleUuid = const Uuid().v4();
+    final rpModuleUuid = const Uuid().v4();
     final currentRev = _bundleRevision;
+
+    final List<Map<String, dynamic>> modules = [];
+    if (behaviorPacks.isNotEmpty) {
+      modules.add({
+        'description': 'ATM Combined Behavior Pack Modules',
+        'type': 'data',
+        'uuid': bpModuleUuid,
+        'version': [1, currentRev, 0],
+      });
+    }
+    if (resourcePacks.isNotEmpty) {
+      modules.add({
+        'description': 'ATM Combined Resource Pack Modules',
+        'type': 'resources',
+        'uuid': rpModuleUuid,
+        'version': [1, currentRev, 0],
+      });
+    }
 
     final manifestContent = {
       'format_version': 2,
       'header': {
         'name': packName,
-        'description': 'ATM Mega-Pack ($currentRev) with ${packs.length} sorted add-ons.',
+        'description': 'ATM Combined Pack ($currentRev) • ${behaviorPacks.length} BP / ${resourcePacks.length} RP',
         'uuid': masterUuid,
         'version': [1, currentRev, 0],
         'min_engine_version': [1, 20, 0],
       },
-      'modules': [
-        {
-          'type': 'data',
-          'uuid': moduleUuid,
-          'version': [1, currentRev, 0],
-        }
-      ],
+      'modules': modules,
       'metadata': {
         'authors': ['BedrockSmith User'],
-        'bundled_addons_order': packs
-            .asMap()
-            .entries
-            .map((e) => '#${e.key + 1}: ${e.value.name} (${e.value.currentVersion})')
-            .toList(),
+        'bundled_behavior_packs': behaviorPacks.map((p) => p.name).toList(),
+        'bundled_resource_packs': resourcePacks.map((p) => p.name).toList(),
       }
     };
 
@@ -599,6 +630,97 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
     }
   }
 
+  Widget _buildListForType(PackType type) {
+    final list = _detectedAddons.where((a) => a.type == type).toList();
+    if (list.isEmpty) {
+      final isRP = type == PackType.resource;
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(isRP ? Icons.palette_outlined : Icons.extension_outlined, size: 64, color: Colors.white24),
+              const SizedBox(height: 16),
+              Text(
+                'No ${isRP ? "Resource" : "Behavior"} Packs Scanned',
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Take screenshots of your ${isRP ? "Resource Packs" : "Behavior Packs"} tab in Minecraft and tap below to scan.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      itemCount: list.length,
+      itemBuilder: (context, index) {
+        final addon = list[index];
+        return Dismissible(
+          key: Key(addon.id),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 20.0),
+            color: Colors.redAccent.withOpacity(0.8),
+            child: const Icon(Icons.delete, color: Colors.white),
+          ),
+          onDismissed: (_) {
+            setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
+            _persistState();
+          },
+          child: Card(
+            color: const Color(0xFF1E232B),
+            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
+                child: Icon(
+                  addon.type == PackType.resource ? Icons.brush : Icons.smart_toy,
+                  color: Colors.white,
+                  size: 16,
+                ),
+              ),
+              title: Row(
+                children: [
+                  Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
+                  if (addon.isTrinketBridge)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF107C41).withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
+                    ),
+                ],
+              ),
+              subtitle: Text(
+                '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion}',
+                style: const TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white38, size: 18),
+                tooltip: 'Remove',
+                onPressed: () {
+                  setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
+                  _persistState();
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final megaPackCount = _detectedAddons.where((a) => a.inMegaPack).length;
@@ -608,6 +730,16 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
         backgroundColor: const Color(0xFF16191F),
         elevation: 0,
         title: const Text('BEDROCKSMITH', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1)),
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: const Color(0xFF52B788),
+          labelColor: const Color(0xFF52B788),
+          unselectedLabelColor: Colors.white54,
+          tabs: const [
+            Tab(icon: Icon(Icons.palette), text: 'Resource Packs'),
+            Tab(icon: Icon(Icons.extension), text: 'Behavior Packs'),
+          ],
+        ),
         actions: [
           if (_detectedAddons.isNotEmpty) ...[
             IconButton(
@@ -635,8 +767,14 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
         icon: _isProcessing
             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
             : const Icon(Icons.add_photo_alternate),
-        label: Text(_isProcessing ? 'Analyzing...' : 'Scan Screenshots'),
-        onPressed: _isProcessing ? null : _scanScreenshots,
+        label: Text(
+          _isProcessing
+              ? 'Analyzing...'
+              : (_tabController.index == 0 ? 'Scan Resource Packs' : 'Scan Behavior Packs'),
+        ),
+        onPressed: _isProcessing
+            ? null
+            : () => _scanScreenshots(_tabController.index == 0 ? PackType.resource : PackType.behavior),
       ),
       bottomNavigationBar: _detectedAddons.isNotEmpty
           ? Container(
@@ -649,97 +787,20 @@ class _AddonScannerHomeState extends State<AddonScannerHome> {
                 ),
                 icon: const Icon(Icons.tune),
                 label: Text(
-                  'MANAGE LOAD ORDER ($megaPackCount ACTIVE)',
+                  'EXPORT MEGA-PACK ($megaPackCount ACTIVE)',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 onPressed: _showManageMegaPackSheet,
               ),
             )
           : null,
-      body: _detectedAddons.isEmpty
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(32.0),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.screenshot_monitor, size: 64, color: Colors.white24),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'No Add-ons in Library',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Tap below to pick multiple screenshots of your Add-ons list. UI buttons and menus are filtered automatically.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white54, fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-              itemCount: _detectedAddons.length,
-              itemBuilder: (context, index) {
-                final addon = _detectedAddons[index];
-                return Dismissible(
-                  key: Key(addon.id),
-                  direction: DismissDirection.endToStart,
-                  background: Container(
-                    alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.only(right: 20.0),
-                    color: Colors.redAccent.withOpacity(0.8),
-                    child: const Icon(Icons.delete, color: Colors.white),
-                  ),
-                  onDismissed: (_) {
-                    setState(() => _detectedAddons.removeAt(index));
-                    _persistState();
-                  },
-                  child: Card(
-                    color: const Color(0xFF1E232B),
-                    margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-                        child: Icon(
-                          addon.inMegaPack ? Icons.check : Icons.remove,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(child: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold))),
-                          if (addon.isTrinketBridge)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF107C41).withOpacity(0.3),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: const Text('CORE / TRINKET', style: TextStyle(fontSize: 9, color: Color(0xFF52B788))),
-                            ),
-                        ],
-                      ),
-                      subtitle: Text(
-                        'Current: ${addon.currentVersion}',
-                        style: const TextStyle(fontSize: 12, color: Colors.white70),
-                      ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white38, size: 18),
-                        tooltip: 'Remove',
-                        onPressed: () {
-                          setState(() => _detectedAddons.removeAt(index));
-                          _persistState();
-                        },
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildListForType(PackType.resource),
+          _buildListForType(PackType.behavior),
+        ],
+      ),
     );
   }
 }
