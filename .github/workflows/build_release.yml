@@ -23,12 +23,18 @@ jobs:
       - name: Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.x'
+          flutter-version: '3.24.x'
           channel: 'stable'
           cache: true
 
-      - name: Resolve Flutter Dependencies
-        run: flutter pub get
+      - name: Scaffold Native Android Platforms
+        run: |
+          flutter create --platforms=android,windows .
+          flutter pub get
+
+      - name: Configure Android Manifest Permissions
+        run: |
+          sed -i '/<application/i \    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>' android/app/src/main/AndroidManifest.xml
 
       - name: Build Standalone APK
         run: flutter build apk --release
