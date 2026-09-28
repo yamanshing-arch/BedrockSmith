@@ -109,7 +109,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v10');
+    final savedData = prefs.getString('saved_addons_v11');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -127,7 +127,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v10', encoded);
+    await prefs.setString('saved_addons_v11', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -155,7 +155,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         final inputImage = InputImage.fromFilePath(image.path);
         final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
 
-        totalFound += _processSpatialRecognition(recognizedText, targetType, imgWidth, imgHeight);
+        totalFound += _processDiscreteCards(recognizedText, targetType, imgWidth, imgHeight);
       }
 
       await textRecognizer.close();
@@ -164,7 +164,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         final label = targetType == PackType.resource ? 'Resource' : 'Behavior';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Cleanly detected $totalFound $label Pack(s) in priority sequence!'),
+            content: Text('Detected $totalFound $label Pack(s) cleanly separated!'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
@@ -182,11 +182,15 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     }
   }
 
-  int _processSpatialRecognition(RecognizedText recognized, PackType targetType, double imgWidth, double imgHeight) {
-    final minX = imgWidth * 0.35;
-    final maxX = imgWidth * 0.80;
-    final minY = imgHeight * 0.08;
-    final maxY = imgHeight * 0.86;
+  int _processDiscreteCards(RecognizedText recognized, PackType targetType, double imgWidth, double imgHeight) {
+    // Coordinate bounds:
+    // Left begins at 0.34 (right after sidebar and pack icon)
+    // Right ends at 0.82 (before settings / remove buttons)
+    // Vertical span covers the active cards list
+    final minX = imgWidth * 0.34;
+    final maxX = imgWidth * 0.82;
+    final minY = imgHeight * 0.10;
+    final maxY = imgHeight * 0.88;
 
     final blockedTerms = [
       'SETTINGS', 'GENERAL', 'ADVANCED', 'MULTIPLAYER', 'CHEATS', 'RESOURCE PACKS',
@@ -196,7 +200,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       'TOUCH', 'SUBSCRIPTION', 'REALMS', 'EDIT WORLD', 'ACHIEVEMENTS', 'SAME ENTITY'
     ];
 
-    final List<TextLine> validLines = [];
+    // Filter valid lines strictly inside the central column
+    final List<TextLine> contentLines = [];
     for (final block in recognized.blocks) {
       for (final line in block.lines) {
         final box = line.boundingBox;
@@ -209,56 +214,87 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         if (blockedTerms.any((term) => upper.contains(term))) continue;
         if (line.text.split(' ').length > 8 || line.text.endsWith('.')) continue;
 
-        validLines.add(line);
+        contentLines.add(line);
       }
     }
 
-    validLines.sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+    if (contentLines.isEmpty) return 0;
 
-    final List<AddonEntry> parsedPacks = [];
-    AddonEntry? currentPack;
+    // Group lines into distinct vertical rows.
+    // Each row card in Minecraft is ~15% to 18% of the screen height.
+    final double rowHeightTolerance = imgHeight * 0.08;
+    contentLines.sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
 
-    for (final line in validLines) {
-      var raw = line.text.trim();
-      final priorityMatch = RegExp(r'^(?:::|#|:|\.)?\s*(\d{1,3})\b').firstMatch(raw);
-
-      if (priorityMatch != null) {
-        final pNum = int.tryParse(priorityMatch.group(1)!);
-        raw = raw.replaceFirst(priorityMatch.group(0)!, '').trim();
-        raw = _cleanRawTitle(raw);
-
-        if (raw.isNotEmpty) {
-          final entry = _createEntry(raw, pNum, targetType);
-          parsedPacks.add(entry);
-          currentPack = entry;
+    final List<List<TextLine>> rows = [];
+    for (final line in contentLines) {
+      bool matched = false;
+      for (final row in rows) {
+        final double avgY = row.map((l) => l.boundingBox.top).reduce((a, b) => a + b) / row.length;
+        if ((line.boundingBox.top - avgY).abs() < rowHeightTolerance) {
+          row.add(line);
+          matched = true;
+          break;
         }
-      } else {
-        raw = _cleanRawTitle(raw);
-        if (raw.isEmpty) continue;
-        if (raw.length <= 4 && !raw.contains('Add') && !raw.contains('Pack')) continue;
-
-        if (currentPack != null &&
-            !currentPack.name.endsWith(raw) &&
-            !currentPack.name.contains(raw)) {
-          currentPack.name = '${currentPack.name} $raw'.trim();
-        } else {
-          final entry = _createEntry(raw, null, targetType);
-          parsedPacks.add(entry);
-          currentPack = entry;
-        }
+      }
+      if (!matched) {
+        rows.add([line]);
       }
     }
 
     int newlyAdded = 0;
-    for (final pack in parsedPacks) {
-      pack.name = _permanentMojanglesEngine(pack.name);
+    for (final row in rows) {
+      // Sort items inside the row from left to right
+      row.sort((a, b) => a.boundingBox.left.compareTo(b.boundingBox.left));
+      String combinedRowText = row.map((l) => l.text.trim()).join(' ');
+
+      // Extract Priority (#1 - #99)
+      int? priorityNumber;
+      final priorityMatch = RegExp(r'(?:^|[^\d])#?\s*(\d{1,3})\b').firstMatch(combinedRowText);
+      if (priorityMatch != null) {
+        priorityNumber = int.tryParse(priorityMatch.group(1)!);
+        combinedRowText = combinedRowText.replaceFirst(priorityMatch.group(0)!, ' ').trim();
+      }
+
+      // Extract Version
+      final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(combinedRowText);
+      String version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
+
+      // Clean Title
+      var cleanTitle = combinedRowText
+          .replaceAll(RegExp(r'\[v?\d+\.\d+(\.\d+)?\]', caseSensitive: false), '')
+          .replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?', caseSensitive: false), '')
+          .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?.]+\s*'), '')
+          .replaceAll(RegExp(r'[\]\[]+'), '')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+
+      cleanTitle = _cleanMojanglesPixelTypos(cleanTitle);
+
+      if (cleanTitle.length < 3) continue;
+
+      final lower = cleanTitle.toLowerCase();
+      final isBridge = lower.contains('trinket') ||
+          lower.contains('curios') ||
+          lower.contains('amulet') ||
+          lower.contains('backpack') ||
+          lower.contains('neck') ||
+          lower.contains('api') ||
+          lower.contains('core');
 
       final exists = _detectedAddons.any(
-        (a) => a.name.toLowerCase() == pack.name.toLowerCase() && a.type == targetType,
+        (a) => a.name.toLowerCase() == lower && a.type == targetType,
       );
 
-      if (!exists && pack.name.length >= 3) {
-        _detectedAddons.add(pack);
+      if (!exists) {
+        _detectedAddons.add(AddonEntry(
+          id: const Uuid().v4(),
+          name: cleanTitle,
+          currentVersion: version,
+          type: targetType,
+          originalPriority: priorityNumber,
+          inMegaPack: true,
+          isTrinketBridge: isBridge,
+        ));
         newlyAdded++;
       }
     }
@@ -280,66 +316,29 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     return newlyAdded;
   }
 
-  String _cleanRawTitle(String text) {
+  String _cleanMojanglesPixelTypos(String text) {
     return text
-        .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?.]+\s*'), '')
-        .replaceAll(RegExp(r'[\]\[]+'), '')
-        .trim();
-  }
-
-  String _permanentMojanglesEngine(String rawTitle) {
-    final words = rawTitle.split(' ');
-    final correctedWords = words.map((word) {
-      var w = word;
-      if (RegExp(r'^Oravestone', caseSensitive: false).hasMatch(w)) {
-        w = w.replaceFirst(RegExp(r'^O', caseSensitive: false), 'G');
-      }
-      if (RegExp(r'^Foison', caseSensitive: false).hasMatch(w)) {
-        w = w.replaceFirst(RegExp(r'^F', caseSensitive: false), 'P');
-      }
-      if (RegExp(r'^Ouide', caseSensitive: false).hasMatch(w)) {
-        w = w.replaceFirst(RegExp(r'^Oui', caseSensitive: false), 'Gui');
-      }
-      if (RegExp(r'^Riotten', caseSensitive: false).hasMatch(w)) {
-        w = 'Rotten';
-      }
-      return w;
-    }).toList();
-
-    return correctedWords.join(' ')
+        .replaceAll('Oravestone', 'Gravestone')
+        .replaceAll('Foisonous', 'Poisonous')
+        .replaceAll('Ouide Books', 'Guide Books')
+        .replaceAll('Riotten Flesh', 'Rotten Flesh')
+        .replaceAll('DURAALITY', 'Durability')
+        .replaceAll('CRIEND', "Friend")
+        .replaceAll('RODON', "Add-On")
+        .replaceAll('REFURGED', "Reforged")
+        .replaceAll('CRPJ', "RP")
+        .replaceAll('CRF', "RP")
+        .replaceAll('HETWTF', "")
+        .replaceAll('DRE ERLPS', "")
+        .replaceAll('TRS A', "A")
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-  }
-
-  AddonEntry _createEntry(String title, int? priority, PackType targetType) {
-    final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(title);
-    final version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
-
-    final lower = title.toLowerCase();
-    final isBridge = lower.contains('trinket') ||
-        lower.contains('curios') ||
-        lower.contains('amulet') ||
-        lower.contains('backpack') ||
-        lower.contains('neck') ||
-        lower.contains('api') ||
-        lower.contains('core');
-
-    return AddonEntry(
-      id: const Uuid().v4(),
-      name: title,
-      currentVersion: version,
-      type: targetType,
-      originalPriority: priority,
-      inMegaPack: true,
-      isTrinketBridge: isBridge,
-    );
   }
 
   Future<void> _launchGeminiSupport() async {
     final rpPacks = _detectedAddons.where((a) => a.type == PackType.resource).toList();
     final bpPacks = _detectedAddons.where((a) => a.type == PackType.behavior).toList();
 
-    // Create a diagnostic summary of the app's current state
     final buffer = StringBuffer();
     buffer.writeln('=== BedrockSmith Support Report ===');
     buffer.writeln('App Version: v1.0.0');
