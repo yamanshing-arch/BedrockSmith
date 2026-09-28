@@ -131,7 +131,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v17');
+    final savedData = prefs.getString('saved_addons_v18');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -150,7 +150,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v17', encoded);
+    await prefs.setString('saved_addons_v18', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -193,12 +193,20 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         ),
         actions: [
           TextButton(
-            child: const Text('Cancel'),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
             onPressed: () => Navigator.pop(ctx),
           ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41)),
-            child: const Text('Save Key'),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF107C41),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            ),
+            icon: const Icon(Icons.check, size: 18, color: Colors.white),
+            label: const Text(
+              'Apply Key',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
             onPressed: () {
               setState(() {
                 _geminiApiKey = keyController.text.trim();
@@ -207,7 +215,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('Gemini API key saved! Ready to scan.'),
+                  content: Text('Gemini API key applied! Ready to scan.'),
                   backgroundColor: Color(0xFF107C41),
                 ),
               );
@@ -335,7 +343,7 @@ Return ONLY a JSON array with this structure:
         final label = targetType == PackType.resource ? 'Resource' : 'Behavior';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('AI perfectly parsed $addedCount $label Pack(s)!'),
+            content: Text('AI parsed $addedCount $label Pack(s) in sequence!'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
@@ -366,7 +374,7 @@ Return ONLY a JSON array with this structure:
       if (sanitized.length < 3) return;
 
       final query = Uri.encodeComponent(sanitized);
-      final url = Uri.parse('https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter=$query&pageSize=3');
+      final url = Uri.parse('https://api.curseForge.com/v1/mods/search?gameId=432&searchFilter=$query&pageSize=3');
 
       final response = await http.get(
         url,
@@ -675,7 +683,7 @@ Return ONLY a JSON array with this structure:
           ],
         ),
         actions: [
-          TextButton(child: const Text('Cancel'), onPressed: () => Navigator.pop(ctx)),
+          TextButton(child: const Text('Cancel', style: TextStyle(color: Colors.white70)), onPressed: () => Navigator.pop(ctx)),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
             icon: const Icon(Icons.save_alt),
@@ -791,7 +799,7 @@ Return ONLY a JSON array with this structure:
           ],
         ),
         actions: [
-          TextButton(child: const Text('Cancel'), onPressed: () => Navigator.pop(ctx)),
+          TextButton(child: const Text('Cancel', style: TextStyle(color: Colors.white70)), onPressed: () => Navigator.pop(ctx)),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
             child: const Text('Save'),
