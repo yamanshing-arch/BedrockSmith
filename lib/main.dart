@@ -791,7 +791,7 @@ Return ONLY a JSON array with this structure:
         backgroundColor: const Color(0xFF1E232B),
         title: const Text('Edit Add-on Details', style: TextStyle(color: Color(0xFF52B788))),
         content: Column(
-          mainAxisSize: dynamic,
+          mainAxisSize: MainAxisSize.min,
           children: [
             TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder())),
             const SizedBox(height: 12),
