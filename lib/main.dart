@@ -131,7 +131,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v18');
+    final savedData = prefs.getString('saved_addons_v19');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -150,7 +150,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v18', encoded);
+    await prefs.setString('saved_addons_v19', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -242,7 +242,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     try {
       final model = GenerativeModel(
-        model: 'gemini-1.5-flash',
+        model: 'gemini-1.5-flash-latest',
         apiKey: _geminiApiKey,
         generationConfig: GenerationConfig(
           responseMimeType: 'application/json',
@@ -374,7 +374,7 @@ Return ONLY a JSON array with this structure:
       if (sanitized.length < 3) return;
 
       final query = Uri.encodeComponent(sanitized);
-      final url = Uri.parse('https://api.curseForge.com/v1/mods/search?gameId=432&searchFilter=$query&pageSize=3');
+      final url = Uri.parse('https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter=$query&pageSize=3');
 
       final response = await http.get(
         url,
@@ -398,7 +398,7 @@ Return ONLY a JSON array with this structure:
             final lowerRemote = remoteName.toLowerCase();
             final lowerLocal = sanitized.toLowerCase();
 
-            if (lowerRemote.contains(lowerLocal) || lowerLocal.contains(lowerRemote) || _calculateSimilarity(lowerRemote, lowerLocal) > 0.65) {
+            if (lowerRemote.contains(lowerLocal) || lowerLocal.contains(remoteName) || _calculateSimilarity(lowerRemote, lowerLocal) > 0.65) {
               addon.name = remoteName;
               addon.curseForgeUrl = mod['links']?['websiteUrl'] ?? '';
 
@@ -791,7 +791,7 @@ Return ONLY a JSON array with this structure:
         backgroundColor: const Color(0xFF1E232B),
         title: const Text('Edit Add-on Details', style: TextStyle(color: Color(0xFF52B788))),
         content: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: dynamic,
           children: [
             TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder())),
             const SizedBox(height: 12),
