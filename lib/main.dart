@@ -131,7 +131,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v19');
+    final savedData = prefs.getString('saved_addons_v20');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -150,7 +150,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v19', encoded);
+    await prefs.setString('saved_addons_v20', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
@@ -242,7 +242,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     try {
       final model = GenerativeModel(
-        model: 'gemini-1.5-flash-latest',
+        model: 'gemini-2.0-flash',
         apiKey: _geminiApiKey,
         generationConfig: GenerationConfig(
           responseMimeType: 'application/json',
