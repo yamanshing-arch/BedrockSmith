@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:archive/archive_io.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -107,6 +107,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   String? _bundleMasterUuid;
   int _bundleRevision = 1;
   String _bundleName = 'ATM_Mega_Pack';
+  String _geminiApiKey = '';
 
   static const String _curseForgeApiKey = r'$2a$10$3FNHa/4qb22oL7Fkd6rSvOOuznn.HKesoJyJk0ZYoLH8w8hVEYcX.';
 
@@ -130,7 +131,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v16');
+    final savedData = prefs.getString('saved_addons_v17');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -142,52 +143,171 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       _bundleMasterUuid = prefs.getString('atm_bundle_uuid');
       _bundleRevision = prefs.getInt('atm_bundle_revision') ?? 1;
       _bundleName = prefs.getString('atm_bundle_name') ?? 'ATM_Mega_Pack';
+      _geminiApiKey = prefs.getString('gemini_api_key') ?? '';
     });
   }
 
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v16', encoded);
+    await prefs.setString('saved_addons_v17', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
     await prefs.setInt('atm_bundle_revision', _bundleRevision);
     await prefs.setString('atm_bundle_name', _bundleName);
+    await prefs.setString('gemini_api_key', _geminiApiKey);
   }
 
-  Future<void> _scanScreenshots(PackType targetType) async {
+  void _showApiKeyDialog() {
+    final keyController = TextEditingController(text: _geminiApiKey);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E232B),
+        title: const Row(
+          children: [
+            Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
+            SizedBox(width: 8),
+            Text('Gemini Vision API Key', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'To visually parse your Minecraft add-ons with full AI accuracy, enter a free Gemini API key from Google AI Studio (aistudio.google.com):',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: keyController,
+              decoration: const InputDecoration(
+                labelText: 'Google AI Studio Key',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.pop(ctx),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41)),
+            child: const Text('Save Key'),
+            onPressed: () {
+              setState(() {
+                _geminiApiKey = keyController.text.trim();
+              });
+              _persistState();
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Gemini API key saved! Ready to scan.'),
+                  backgroundColor: Color(0xFF107C41),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _scanScreenshotsWithAI(PackType targetType) async {
+    if (_geminiApiKey.isEmpty) {
+      _showApiKeyDialog();
+      return;
+    }
+
     final List<XFile> images = await _picker.pickMultiImage();
     if (images.isEmpty) return;
 
     setState(() {
       _isProcessing = true;
-      _statusMessage = 'Reading image coordinates...';
+      _statusMessage = 'Connecting to Gemini Vision...';
     });
 
     try {
-      final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      final model = GenerativeModel(
+        model: 'gemini-1.5-flash',
+        apiKey: _geminiApiKey,
+        generationConfig: GenerationConfig(
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        ),
+      );
+
       final List<AddonEntry> newAddons = [];
 
       for (int i = 0; i < images.length; i++) {
-        setState(() => _statusMessage = 'Analyzing frame ${i + 1} of ${images.length}...');
+        setState(() => _statusMessage = 'AI reading screenshot ${i + 1} of ${images.length}...');
         final file = File(images[i].path);
         final bytes = await file.readAsBytes();
-        final decodedImage = await decodeImageFromList(bytes);
-        final double imgWidth = decodedImage.width.toDouble();
-        final double imgHeight = decodedImage.height.toDouble();
 
-        final inputImage = InputImage.fromFilePath(images[i].path);
-        final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
+        final prompt = TextPart('''
+You are reading a Minecraft Bedrock world add-on list screenshot.
+Examine each horizontal card row carefully.
+Extract each active pack on screen in strict order from top to bottom.
+Ignore sidebar menu items (General, Advanced, Cheats, Resource packs, Behaviour packs, Experiments).
+Ignore buttons (Settings, Remove, Deactivate) and footer instructions.
 
-        final found = _extractPacksSpatially(recognizedText, targetType, imgWidth, imgHeight);
-        newAddons.addAll(found);
+For each pack card:
+- "priority": the integer index shown on the card (e.g. 1, 5, 51, 82, 91). If missing or obscured, use null.
+- "name": the complete clean add-on title. Merge wrapped lines of title together. Fix pixel-font OCR glitches (e.g. "Oravestone" -> "Gravestone", "Foisonous" -> "Poisonous", "Ouide" -> "Guide").
+- "version": the version string if visible (e.g. "v1.4.1", "1.2.8", "3.3"), otherwise "v1.0.0".
+
+Return ONLY a JSON array with this structure:
+[
+  {"priority": 51, "name": "Compostables+", "version": "v1.0.0"}
+]
+''');
+
+        final imagePart = DataPart('image/jpeg', bytes);
+
+        final response = await model.generateContent([
+          Content.multi([prompt, imagePart])
+        ]);
+
+        if (response.text != null && response.text!.isNotEmpty) {
+          try {
+            final List parsed = jsonDecode(response.text!);
+            for (final item in parsed) {
+              final rawName = (item['name'] ?? '').toString().trim();
+              if (rawName.isEmpty) continue;
+
+              final int? priority = item['priority'] is int ? item['priority'] : int.tryParse('${item['priority']}');
+              final String version = (item['version'] ?? 'v1.0.0').toString().trim();
+
+              final lower = rawName.toLowerCase();
+              final isBridge = lower.contains('trinket') ||
+                  lower.contains('curios') ||
+                  lower.contains('amulet') ||
+                  lower.contains('backpack') ||
+                  lower.contains('neck') ||
+                  lower.contains('api') ||
+                  lower.contains('core');
+
+              newAddons.add(AddonEntry(
+                id: const Uuid().v4(),
+                name: rawName,
+                currentVersion: version,
+                type: targetType,
+                originalPriority: priority,
+                inMegaPack: true,
+                isTrinketBridge: isBridge,
+              ));
+            }
+          } catch (_) {}
+        }
       }
 
-      await textRecognizer.close();
-
       for (int i = 0; i < newAddons.length; i++) {
-        setState(() => _statusMessage = 'Verifying names: ${i + 1}/${newAddons.length}...');
+        setState(() => _statusMessage = 'CurseForge registry check: ${i + 1}/${newAddons.length}...');
         await _fetchCurseForgeMetadataStrict(newAddons[i]);
       }
 
@@ -215,14 +335,14 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         final label = targetType == PackType.resource ? 'Resource' : 'Behavior';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Added $addedCount $label Pack(s) with confirmed priorities!'),
+            content: Text('AI perfectly parsed $addedCount $label Pack(s)!'),
             backgroundColor: const Color(0xFF107C41),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Scan error: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AI Scan error: $e')));
       }
     } finally {
       if (mounted) {
@@ -232,103 +352,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         });
       }
     }
-  }
-
-  List<AddonEntry> _extractPacksSpatially(RecognizedText recognized, PackType targetType, double imgWidth, double imgHeight) {
-    final minX = imgWidth * 0.30;
-    final maxX = imgWidth * 0.86;
-    final minY = imgHeight * 0.08;
-    final maxY = imgHeight * 0.88;
-
-    final blockedTerms = [
-      'SETTINGS', 'GENERAL', 'ADVANCED', 'MULTIPLAYER', 'CHEATS', 'RESOURCE PACKS',
-      'BEHAVIOUR PACKS', 'BEHAVIOR PACKS', 'ACTIVE', 'MY PACKS', 'AVAILABLE', 'DEACTIVATE',
-      'STORAGE', 'EXPERIMENT', 'CHANGES TO THE SAME', 'IF MULTIPLE', 'CREATOR', 'GLOBAL RESOURCES',
-      'MINECRAFT', 'FEEDBACK', 'HELP', 'HOW TO PLAY', 'AUDIO', 'VIDEO', 'KEYBOARD', 'CONTROLLER',
-      'TOUCH', 'SUBSCRIPTION', 'REALMS', 'EDIT WORLD', 'ACHIEVEMENTS', 'SAME ENTITY'
-    ];
-
-    final List<TextLine> contentLines = [];
-    for (final block in recognized.blocks) {
-      for (final line in block.lines) {
-        final box = line.boundingBox;
-        if (box.left < minX || box.right > maxX || box.top < minY || box.bottom > maxY) continue;
-
-        final upper = line.text.trim().toUpperCase();
-        if (upper.length < 2 || RegExp(r'^[^a-zA-Z0-9]+$').hasMatch(upper)) continue;
-        if (blockedTerms.any((term) => upper.contains(term))) continue;
-        if (line.text.split(' ').length > 8 || line.text.endsWith('.')) continue;
-
-        contentLines.add(line);
-      }
-    }
-
-    if (contentLines.isEmpty) return [];
-
-    final double rowHeightTolerance = imgHeight * 0.075;
-    contentLines.sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
-
-    final List<List<TextLine>> rows = [];
-    for (final line in contentLines) {
-      bool matched = false;
-      for (final row in rows) {
-        final double avgY = row.map((l) => l.boundingBox.top).reduce((a, b) => a + b) / row.length;
-        if ((line.boundingBox.top - avgY).abs() < rowHeightTolerance) {
-          row.add(line);
-          matched = true;
-          break;
-        }
-      }
-      if (!matched) rows.add([line]);
-    }
-
-    final List<AddonEntry> extracted = [];
-    for (final row in rows) {
-      row.sort((a, b) => a.boundingBox.left.compareTo(b.boundingBox.left));
-      String rowText = row.map((l) => l.text.trim()).join(' ');
-
-      int? priorityNumber;
-      final priorityMatch = RegExp(r'(?:^|[^\d])(?:::|#|\.)?\s*(\d{1,3})\b').firstMatch(rowText);
-      if (priorityMatch != null) {
-        priorityNumber = int.tryParse(priorityMatch.group(1)!);
-        rowText = rowText.replaceFirst(priorityMatch.group(0)!, ' ').trim();
-      }
-
-      final versionMatch = RegExp(r'v?(\d+\.\d+(\.\d+)?)', caseSensitive: false).firstMatch(rowText);
-      String version = versionMatch != null ? versionMatch.group(0)! : 'v1.0.0';
-
-      var cleanTitle = rowText
-          .replaceAll(RegExp(r'\[v?\d+\.\d+(\.\d+)?\]', caseSensitive: false), '')
-          .replaceAll(RegExp(r'v?\d+\.\d+(\.\d+)?', caseSensitive: false), '')
-          .replaceAll(RegExp(r'^[\]\[:;|\-_/\\•?.]+\s*'), '')
-          .replaceAll(RegExp(r'[\]\[]+'), '')
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim();
-
-      cleanTitle = _cleanPixelArtifacts(cleanTitle);
-      if (cleanTitle.length < 3) continue;
-
-      final lower = cleanTitle.toLowerCase();
-      final isBridge = lower.contains('trinket') ||
-          lower.contains('curios') ||
-          lower.contains('amulet') ||
-          lower.contains('backpack') ||
-          lower.contains('neck') ||
-          lower.contains('api') ||
-          lower.contains('core');
-
-      extracted.add(AddonEntry(
-        id: const Uuid().v4(),
-        name: cleanTitle,
-        currentVersion: version,
-        type: targetType,
-        originalPriority: priorityNumber,
-        inMegaPack: true,
-        isTrinketBridge: isBridge,
-      ));
-    }
-
-    return extracted;
   }
 
   Future<void> _fetchCurseForgeMetadataStrict(AddonEntry addon) async {
@@ -417,26 +440,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         return a.name.compareTo(b.name);
       });
     });
-  }
-
-  String _cleanPixelArtifacts(String text) {
-    return text
-        .replaceAll('Oravestone', 'Gravestone')
-        .replaceAll('Foisonous', 'Poisonous')
-        .replaceAll('Ouide Books', 'Guide Books')
-        .replaceAll('Riotten Flesh', 'Rotten Flesh')
-        .replaceAll('DURAALITY', 'Durability')
-        .replaceAll('CRIEND', "Friend")
-        .replaceAll('RODON', "Add-On")
-        .replaceAll('REFURGED', "Reforged")
-        .replaceAll('CRPJ', "RP")
-        .replaceAll('CRF', "RP")
-        .replaceAll('HETWTF', "")
-        .replaceAll('DRE ERLPS', "")
-        .replaceAll('TRS A', "A")
-        .replaceAll('5MPLE', "Simple")
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
   }
 
   void _openUrl(String? urlString) async {
@@ -821,7 +824,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               Text('No ${isRP ? "Resource" : "Behavior"} Packs Scanned', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               Text(
-                'Select screenshots of your Minecraft ${isRP ? "Resource Packs" : "Behavior Packs"} tab.',
+                'Tap the AI scan button below to analyze your Minecraft screenshots with Gemini Vision.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.white54, fontSize: 13),
               ),
@@ -919,6 +922,11 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.key, color: Color(0xFF52B788)),
+            tooltip: 'Gemini API Key',
+            onPressed: _showApiKeyDialog,
+          ),
+          IconButton(
             icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
             tooltip: 'Clear All',
             onPressed: () {
@@ -982,6 +990,14 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
                 _showExportDialog();
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.key, color: Colors.white70),
+              title: const Text('Configure Gemini AI Key'),
+              onTap: () {
+                Navigator.pop(context);
+                _showApiKeyDialog();
+              },
+            ),
             const Divider(color: Colors.white24),
             ListTile(
               leading: const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
@@ -990,7 +1006,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
                 Navigator.pop(context);
                 final buffer = StringBuffer();
                 buffer.writeln('=== BedrockSmith Support Report ===');
-                buffer.writeln('App Version: v1.0.0');
+                buffer.writeln('App Version: v1.0.0 (AI Vision Enabled)');
                 buffer.writeln('Bundle UUID: ${_bundleMasterUuid ?? "None"}');
                 buffer.writeln('Bundle Revision: $_bundleRevision');
                 buffer.writeln('Total Detected Add-ons: ${_detectedAddons.length}');
@@ -1015,15 +1031,15 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         foregroundColor: Colors.white,
         icon: _isProcessing
             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-            : const Icon(Icons.add_photo_alternate),
+            : const Icon(Icons.auto_awesome),
         label: Text(
           _isProcessing
-              ? (_statusMessage.isNotEmpty ? _statusMessage : 'Analyzing...')
-              : (_tabController.index == 0 ? 'Scan Resource Packs' : 'Scan Behavior Packs'),
+              ? (_statusMessage.isNotEmpty ? _statusMessage : 'AI Analyzing...')
+              : (_tabController.index == 0 ? 'AI Scan Resource Packs' : 'AI Scan Behavior Packs'),
         ),
         onPressed: _isProcessing
             ? null
-            : () => _scanScreenshots(_tabController.index == 0 ? PackType.resource : PackType.behavior),
+            : () => _scanScreenshotsWithAI(_tabController.index == 0 ? PackType.resource : PackType.behavior),
       ),
       bottomNavigationBar: _detectedAddons.isNotEmpty
           ? Container(
