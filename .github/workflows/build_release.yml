@@ -35,7 +35,7 @@ jobs:
         run: flutter build apk --release
 
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BedrockSmith-Release-APK
           path: build/app/outputs/flutter-apk/app-release.apk
