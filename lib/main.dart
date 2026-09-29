@@ -22,7 +22,7 @@ class BedrockSmithApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BedrockSmith',
+      title: 'BedrockSmith: Addon Manager',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF111418),
@@ -109,6 +109,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
   String _bundleName = 'ATM_Mega_Pack';
   String _geminiApiKey = '';
 
+  static const String _permanentKeyStorage = 'bedrocksmith_gemini_api_key';
   static const String _curseForgeApiKey = r'$2a$10$3FNHa/4qb22oL7Fkd6rSvOOuznn.HKesoJyJk0ZYoLH8w8hVEYcX.';
 
   @override
@@ -131,7 +132,8 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
-    final savedData = prefs.getString('saved_addons_v20');
+    final savedKey = prefs.getString(_permanentKeyStorage) ?? '';
+    final savedData = prefs.getString('saved_addons_store_v1');
     if (savedData != null) {
       try {
         final decoded = jsonDecode(savedData) as List;
@@ -140,23 +142,23 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     }
 
     setState(() {
+      _geminiApiKey = savedKey;
       _bundleMasterUuid = prefs.getString('atm_bundle_uuid');
       _bundleRevision = prefs.getInt('atm_bundle_revision') ?? 1;
       _bundleName = prefs.getString('atm_bundle_name') ?? 'ATM_Mega_Pack';
-      _geminiApiKey = prefs.getString('gemini_api_key') ?? '';
     });
   }
 
   Future<void> _persistState() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = jsonEncode(_detectedAddons.map((a) => a.toMap()).toList());
-    await prefs.setString('saved_addons_v20', encoded);
+    await prefs.setString('saved_addons_store_v1', encoded);
     if (_bundleMasterUuid != null) {
       await prefs.setString('atm_bundle_uuid', _bundleMasterUuid!);
     }
     await prefs.setInt('atm_bundle_revision', _bundleRevision);
     await prefs.setString('atm_bundle_name', _bundleName);
-    await prefs.setString('gemini_api_key', _geminiApiKey);
+    await prefs.setString(_permanentKeyStorage, _geminiApiKey);
   }
 
   void _showApiKeyDialog() {
@@ -165,28 +167,40 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E232B),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
-            SizedBox(width: 8),
-            Text('Gemini Vision API Key', style: TextStyle(fontSize: 16)),
+            const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
+            const SizedBox(width: 8),
+            Text(
+              _geminiApiKey.isEmpty ? 'Setup Gemini AI Key' : 'Gemini AI Key Settings',
+              style: const TextStyle(fontSize: 16),
+            ),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'To visually parse your Minecraft add-ons with full AI accuracy, enter a free Gemini API key from Google AI Studio (aistudio.google.com):',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
+            Text(
+              _geminiApiKey.isEmpty
+                  ? 'Enter your free Gemini API key from Google AI Studio. It will be remembered permanently on your device.'
+                  : 'Your API key is active and saved. You can edit, replace, or remove it at any time.',
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: keyController,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Google AI Studio Key',
-                border: OutlineInputBorder(),
+                hintText: 'Paste key here...',
+                border: const OutlineInputBorder(),
                 isDense: true,
+                suffixIcon: keyController.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () => keyController.clear(),
+                      )
+                    : null,
               ),
             ),
           ],
@@ -204,26 +218,67 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
             ),
             icon: const Icon(Icons.check, size: 18, color: Colors.white),
             label: const Text(
-              'Apply Key',
+              'Apply & Remember Key',
               style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
             ),
-            onPressed: () {
+            onPressed: () async {
+              final newKey = keyController.text.trim();
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString(_permanentKeyStorage, newKey);
+
               setState(() {
-                _geminiApiKey = keyController.text.trim();
+                _geminiApiKey = newKey;
               });
-              _persistState();
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Gemini API key applied! Ready to scan.'),
-                  backgroundColor: Color(0xFF107C41),
-                ),
-              );
+
+              if (mounted) {
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      newKey.isEmpty
+                          ? 'API key removed.'
+                          : 'Gemini API key saved permanently! Ready to scan.',
+                    ),
+                    backgroundColor: const Color(0xFF107C41),
+                  ),
+                );
+              }
             },
           ),
         ],
       ),
     );
+  }
+
+  Future<String> _resolveBestGeminiModel() async {
+    try {
+      final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models?key=$_geminiApiKey');
+      final response = await http.get(url).timeout(const Duration(seconds: 4));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['models'] != null && data['models'] is List) {
+          final List models = data['models'];
+
+          final flashModels = models.where((m) {
+            final methods = (m['supportedGenerationMethods'] as List?)?.map((e) => e.toString()).toList() ?? [];
+            final name = (m['name'] ?? '').toString().toLowerCase();
+            return methods.contains('generateContent') && name.contains('flash');
+          }).map((m) {
+            String name = (m['name'] ?? '').toString();
+            if (name.startsWith('models/')) name = name.replaceFirst('models/', '');
+            return name;
+          }).toList();
+
+          if (flashModels.isNotEmpty) {
+            flashModels.sort((a, b) => b.compareTo(a));
+            return flashModels.first;
+          }
+        }
+      }
+    } catch (_) {}
+
+    return 'gemini-3.8-flash';
   }
 
   Future<void> _scanScreenshotsWithAI(PackType targetType) async {
@@ -237,12 +292,16 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     setState(() {
       _isProcessing = true;
-      _statusMessage = 'Connecting to Gemini Vision...';
+      _statusMessage = 'Selecting active Gemini model...';
     });
 
     try {
+      final activeModelName = await _resolveBestGeminiModel();
+
+      setState(() => _statusMessage = 'Connecting to $activeModelName...');
+
       final model = GenerativeModel(
-        model: 'gemini-2.0-flash',
+        model: activeModelName,
         apiKey: _geminiApiKey,
         generationConfig: GenerationConfig(
           responseMimeType: 'application/json',
@@ -253,7 +312,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       final List<AddonEntry> newAddons = [];
 
       for (int i = 0; i < images.length; i++) {
-        setState(() => _statusMessage = 'AI reading screenshot ${i + 1} of ${images.length}...');
+        setState(() => _statusMessage = 'AI reading screenshot ${i + 1} of ${images.length} ($activeModelName)...');
         final file = File(images[i].path);
         final bytes = await file.readAsBytes();
 
@@ -817,6 +876,38 @@ Return ONLY a JSON array with this structure:
     );
   }
 
+  void _showMojangLegalDisclaimer() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E232B),
+        title: const Text('Legal & Compliance Notice', style: TextStyle(color: Color(0xFF52B788), fontSize: 16)),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'BedrockSmith is an independent community utility tool designed to help players organize local load orders, inspect compatibility, and bundle personal add-on packages. All Minecraft assets, trademarks, and registered names belong to Mojang AB and Microsoft Corporation.',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
+            child: const Text('Understood'),
+            onPressed: () => Navigator.pop(ctx),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildListForType(PackType type) {
     final list = _detectedAddons.where((a) => a.type == type).toList();
     if (list.isEmpty) {
@@ -930,8 +1021,11 @@ Return ONLY a JSON array with this structure:
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.key, color: Color(0xFF52B788)),
-            tooltip: 'Gemini API Key',
+            icon: Icon(
+              Icons.key,
+              color: _geminiApiKey.isNotEmpty ? const Color(0xFF52B788) : Colors.amberAccent,
+            ),
+            tooltip: _geminiApiKey.isNotEmpty ? 'Edit Gemini API Key' : 'Setup Gemini API Key',
             onPressed: _showApiKeyDialog,
           ),
           IconButton(
@@ -999,14 +1093,33 @@ Return ONLY a JSON array with this structure:
               },
             ),
             ListTile(
-              leading: const Icon(Icons.key, color: Colors.white70),
-              title: const Text('Configure Gemini AI Key'),
+              leading: Icon(
+                Icons.key,
+                color: _geminiApiKey.isNotEmpty ? const Color(0xFF52B788) : Colors.amberAccent,
+              ),
+              title: Text(_geminiApiKey.isNotEmpty ? 'Edit Gemini AI Key (Saved)' : 'Setup Gemini AI Key'),
               onTap: () {
                 Navigator.pop(context);
                 _showApiKeyDialog();
               },
             ),
             const Divider(color: Colors.white24),
+            ListTile(
+              leading: const Icon(Icons.info_outline, color: Colors.white70),
+              title: const Text('Play Store Compliance Notice'),
+              onTap: () {
+                Navigator.pop(context);
+                _showMojangLegalDisclaimer();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.privacy_tip_outlined, color: Colors.white70),
+              title: const Text('Privacy Policy'),
+              onTap: () {
+                Navigator.pop(context);
+                _openUrl('https://github.com/yamanshing-arch/BedrockSmith#privacy-policy');
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
               title: const Text('Gemini Assistant Diagnostics'),
