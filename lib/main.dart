@@ -140,7 +140,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         _detectedAddons = decoded.map((m) => AddonEntry.fromMap(m)).toList();
       } catch (_) {}
     }
-
     setState(() {
       _geminiApiKey = savedKey;
       _bundleMasterUuid = prefs.getString('atm_bundle_uuid');
@@ -225,11 +224,9 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
               final newKey = keyController.text.trim();
               final prefs = await SharedPreferences.getInstance();
               await prefs.setString(_permanentKeyStorage, newKey);
-
               setState(() {
                 _geminiApiKey = newKey;
               });
-
               if (mounted) {
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -254,31 +251,36 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     try {
       final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models?key=$_geminiApiKey');
       final response = await http.get(url).timeout(const Duration(seconds: 4));
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['models'] != null && data['models'] is List) {
           final List models = data['models'];
-
           final flashModels = models.where((m) {
             final methods = (m['supportedGenerationMethods'] as List?)?.map((e) => e.toString()).toList() ?? [];
             final name = (m['name'] ?? '').toString().toLowerCase();
-            return methods.contains('generateContent') && name.contains('flash');
+            return methods.contains('generateContent') &&
+                name.contains('flash') &&
+                !name.contains('omni'); // Filters out zero-quota omni models
           }).map((m) {
             String name = (m['name'] ?? '').toString();
             if (name.startsWith('models/')) name = name.replaceFirst('models/', '');
             return name;
           }).toList();
 
+          // Prioritize stable free-tier endpoints
+          for (final candidate in ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest']) {
+            if (flashModels.contains(candidate)) {
+              return candidate;
+            }
+          }
+
           if (flashModels.isNotEmpty) {
-            flashModels.sort((a, b) => b.compareTo(a));
             return flashModels.first;
           }
         }
       }
     } catch (_) {}
-
-    return 'gemini-3.8-flash';
+    return 'gemini-1.5-flash';
   }
 
   Future<void> _scanScreenshotsWithAI(PackType targetType) async {
@@ -286,7 +288,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       _showApiKeyDialog();
       return;
     }
-
     final List<XFile> images = await _picker.pickMultiImage();
     if (images.isEmpty) return;
 
@@ -297,7 +298,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     try {
       final activeModelName = await _resolveBestGeminiModel();
-
       setState(() => _statusMessage = 'Connecting to $activeModelName...');
 
       final model = GenerativeModel(
@@ -322,12 +322,10 @@ Examine each horizontal card row carefully.
 Extract each active pack on screen in strict order from top to bottom.
 Ignore sidebar menu items (General, Advanced, Cheats, Resource packs, Behaviour packs, Experiments).
 Ignore buttons (Settings, Remove, Deactivate) and footer instructions.
-
 For each pack card:
 - "priority": the integer index shown on the card (e.g. 1, 5, 51, 82, 91). If missing or obscured, use null.
 - "name": the complete clean add-on title. Merge wrapped lines of title together. Fix pixel-font OCR glitches (e.g. "Oravestone" -> "Gravestone", "Foisonous" -> "Poisonous", "Ouide" -> "Guide").
 - "version": the version string if visible (e.g. "v1.4.1", "1.2.8", "3.3"), otherwise "v1.0.0".
-
 Return ONLY a JSON array with this structure:
 [
   {"priority": 51, "name": "Compostables+", "version": "v1.0.0"}
@@ -335,7 +333,6 @@ Return ONLY a JSON array with this structure:
 ''');
 
         final imagePart = DataPart('image/jpeg', bytes);
-
         final response = await model.generateContent([
           Content.multi([prompt, imagePart])
         ]);
@@ -346,10 +343,8 @@ Return ONLY a JSON array with this structure:
             for (final item in parsed) {
               final rawName = (item['name'] ?? '').toString().trim();
               if (rawName.isEmpty) continue;
-
               final int? priority = item['priority'] is int ? item['priority'] : int.tryParse('${item['priority']}');
               final String version = (item['version'] ?? 'v1.0.0').toString().trim();
-
               final lower = rawName.toLowerCase();
               final isBridge = lower.contains('trinket') ||
                   lower.contains('curios') ||
@@ -381,10 +376,10 @@ Return ONLY a JSON array with this structure:
       int addedCount = 0;
       for (final addon in newAddons) {
         final existingIdx = _detectedAddons.indexWhere(
-          (a) => (a.originalPriority != null && a.originalPriority == addon.originalPriority && a.type == targetType) ||
-                 (a.name.toLowerCase() == addon.name.toLowerCase() && a.type == targetType),
+          (a) =>
+              (a.originalPriority != null && a.originalPriority == addon.originalPriority && a.type == targetType) ||
+              (a.name.toLowerCase() == addon.name.toLowerCase() && a.type == targetType),
         );
-
         if (existingIdx >= 0) {
           if (addon.originalPriority != null && _detectedAddons[existingIdx].originalPriority == null) {
             _detectedAddons[existingIdx].originalPriority = addon.originalPriority;
@@ -429,12 +424,10 @@ Return ONLY a JSON array with this structure:
           .replaceAll(RegExp(r'v?\d+\.\d+.*'), '')
           .replaceAll(RegExp(r'[^a-zA-Z0-9\s]'), '')
           .trim();
-
       if (sanitized.length < 3) return;
 
       final query = Uri.encodeComponent(sanitized);
       final url = Uri.parse('https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter=$query&pageSize=3');
-
       final response = await http.get(
         url,
         headers: {
@@ -447,20 +440,18 @@ Return ONLY a JSON array with this structure:
         final data = jsonDecode(response.body);
         if (data['data'] != null && (data['data'] as List).isNotEmpty) {
           final results = data['data'] as List;
-
           for (final mod in results) {
             final String remoteName = (mod['name'] ?? '').toString();
             if (remoteName.toLowerCase().contains('fabric') || remoteName.toLowerCase().contains('forge')) {
               continue;
             }
-
             final lowerRemote = remoteName.toLowerCase();
             final lowerLocal = sanitized.toLowerCase();
-
-            if (lowerRemote.contains(lowerLocal) || lowerLocal.contains(remoteName) || _calculateSimilarity(lowerRemote, lowerLocal) > 0.65) {
+            if (lowerRemote.contains(lowerLocal) ||
+                lowerLocal.contains(remoteName) ||
+                _calculateSimilarity(lowerRemote, lowerLocal) > 0.65) {
               addon.name = remoteName;
               addon.curseForgeUrl = mod['links']?['websiteUrl'] ?? '';
-
               if (mod['latestFilesIndexes'] != null && (mod['latestFilesIndexes'] as List).isNotEmpty) {
                 final remoteVer = mod['latestFilesIndexes'][0]['displayName'];
                 if (remoteVer != null) {
@@ -567,56 +558,28 @@ Return ONLY a JSON array with this structure:
                   child: ListView(
                     controller: scrollController,
                     children: [
-                      _buildReorderSectionHeader('Behavior Packs', PackType.behavior, () {
-                        setState(() {
-                          _detectedAddons.sort((a, b) {
-                            if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
-                            if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
-                            return (a.originalPriority ?? 999).compareTo(b.originalPriority ?? 999);
-                          });
-                        });
-                        setModalState(() {});
-                        _persistState();
-                      }),
-                      _buildReorderList(PackType.behavior, setModalState),
-                      const SizedBox(height: 16),
-                      _buildReorderSectionHeader('Resource Packs', PackType.resource, () {
-                        setState(() {
-                          _detectedAddons.sort((a, b) {
-                            if (a.isTrinketBridge && !b.isTrinketBridge) return -1;
-                            if (!a.isTrinketBridge && b.isTrinketBridge) return 1;
-                            return (a.originalPriority ?? 999).compareTo(b.originalPriority ?? 999);
-                          });
-                        });
-                        setModalState(() {});
-                        _persistState();
-                      }),
-                      _buildReorderList(PackType.resource, setModalState),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF107C41),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Text(
+                          'Bundle: $_bundleName (Rev $_bundleRevision)',
+                          style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white70),
+                        ),
                       ),
-                      icon: const Icon(Icons.archive),
-                      label: Text(
-                        _bundleMasterUuid != null ? 'EXPORT COMBINED UPDATE' : 'CREATE COMBINED MEGA-PACK',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      onPressed: (rpList.isEmpty && bpList.isEmpty)
-                          ? null
-                          : () {
-                              Navigator.pop(ctx);
-                              _showExportDialog();
+                      ..._detectedAddons.map((addon) => CheckboxListTile(
+                            value: addon.inMegaPack,
+                            activeColor: const Color(0xFF107C41),
+                            title: Text(addon.name, style: const TextStyle(fontSize: 14)),
+                            subtitle: Text('${addon.type.name.toUpperCase()} • ${addon.currentVersion}',
+                                style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                            onChanged: (val) {
+                              setModalState(() {
+                                addon.inMegaPack = val ?? true;
+                              });
+                              setState(() {});
+                              _persistState();
                             },
-                    ),
+                          )),
+                    ],
                   ),
                 ),
               ],
@@ -627,629 +590,162 @@ Return ONLY a JSON array with this structure:
     );
   }
 
-  Widget _buildReorderSectionHeader(String title, PackType type, VoidCallback onSort) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(title, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)),
-          TextButton.icon(
-            style: TextButton.styleFrom(foregroundColor: const Color(0xFF52B788)),
-            icon: const Icon(Icons.sort, size: 16),
-            label: const Text('Priority Order', style: TextStyle(fontSize: 12)),
-            onPressed: onSort,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildReorderList(PackType type, StateSetter setModalState) {
-    final list = _detectedAddons.where((a) => a.type == type).toList();
-    if (list.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Text('No packs scanned in this category.', style: TextStyle(color: Colors.white30, fontSize: 12)),
-      );
-    }
-
-    return ReorderableListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: list.length,
-      onReorder: (oldIndex, newIndex) {
-        setState(() {
-          if (newIndex > oldIndex) newIndex -= 1;
-          final item = list.removeAt(oldIndex);
-          list.insert(newIndex, item);
-
-          final others = _detectedAddons.where((a) => a.type != type).toList();
-          _detectedAddons = type == PackType.behavior ? [...list, ...others] : [...others, ...list];
-        });
-        setModalState(() {});
-        _persistState();
-      },
-      itemBuilder: (context, index) {
-        final addon = list[index];
-        return Container(
-          key: ValueKey(addon.id),
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E232B),
-            borderRadius: BorderRadius.circular(8),
-            border: addon.isTrinketBridge ? Border.all(color: const Color(0xFF52B788).withOpacity(0.4)) : null,
-          ),
-          child: ListTile(
-            dense: true,
-            leading: CircleAvatar(
-              radius: 12,
-              backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-              child: Text(
-                addon.originalPriority != null ? '${addon.originalPriority}' : '${index + 1}',
-                style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold),
-              ),
-            ),
-            title: Text(addon.name, style: TextStyle(fontSize: 13, color: addon.inMegaPack ? Colors.white : Colors.white38)),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Switch(
-                  activeColor: const Color(0xFF107C41),
-                  value: addon.inMegaPack,
-                  onChanged: (val) {
-                    setModalState(() => addon.inMegaPack = val);
-                    setState(() {});
-                    _persistState();
-                  },
-                ),
-                const Icon(Icons.drag_handle, color: Colors.white38, size: 18),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _showExportDialog() {
-    final activeRPs = _detectedAddons.where((a) => a.type == PackType.resource && a.inMegaPack).toList();
-    final activeBPs = _detectedAddons.where((a) => a.type == PackType.behavior && a.inMegaPack).toList();
-    final nameController = TextEditingController(text: _bundleName);
-    final isUpdate = _bundleMasterUuid != null;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E232B),
-        title: Text(
-          isUpdate ? 'Export Mega-Pack Update: v$_bundleRevision' : 'Create Mega-Pack',
-          style: const TextStyle(color: Color(0xFF52B788)),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Bundling ${activeRPs.length} Resource Pack(s) and ${activeBPs.length} Behavior Pack(s) into one single-tap `.mcaddon`:',
-              style: const TextStyle(fontSize: 13, color: Colors.white70),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Mega-Pack Title', border: OutlineInputBorder()),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(child: const Text('Cancel', style: TextStyle(color: Colors.white70)), onPressed: () => Navigator.pop(ctx)),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
-            icon: const Icon(Icons.save_alt),
-            label: Text(isUpdate ? 'Export Update' : 'Generate .mcaddon'),
-            onPressed: () {
-              Navigator.pop(ctx);
-              _generateAndExportMegaPack(nameController.text.trim(), activeRPs, activeBPs);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _generateAndExportMegaPack(
-    String packName,
-    List<AddonEntry> resourcePacks,
-    List<AddonEntry> behaviorPacks,
-  ) async {
-    final masterUuid = _bundleMasterUuid ?? const Uuid().v4();
-    final currentRev = _bundleRevision;
-
-    final List<Map<String, dynamic>> modules = [];
-    if (behaviorPacks.isNotEmpty) {
-      modules.add({
-        'description': 'ATM Combined Behavior Pack Modules',
-        'type': 'data',
-        'uuid': const Uuid().v4(),
-        'version': [1, currentRev, 0],
-      });
-    }
-    if (resourcePacks.isNotEmpty) {
-      modules.add({
-        'description': 'ATM Combined Resource Pack Modules',
-        'type': 'resources',
-        'uuid': const Uuid().v4(),
-        'version': [1, currentRev, 0],
-      });
-    }
-
-    final manifestContent = {
-      'format_version': 2,
-      'header': {
-        'name': packName,
-        'description': 'ATM Combined Pack ($currentRev) • ${behaviorPacks.length} BP / ${resourcePacks.length} RP',
-        'uuid': masterUuid,
-        'version': [1, currentRev, 0],
-        'min_engine_version': [1, 20, 0],
-      },
-      'modules': modules,
-      'metadata': {
-        'authors': ['BedrockSmith User'],
-        'bundled_behavior_packs_order': behaviorPacks.map((p) => '#${p.originalPriority ?? '?'}: ${p.name}').toList(),
-        'bundled_resource_packs_order': resourcePacks.map((p) => '#${p.originalPriority ?? '?'}: ${p.name}').toList(),
-      }
-    };
-
-    final downloadsDir = Directory('/storage/emulated/0/Download');
-    final cleanName = packName.replaceAll(' ', '_');
-    final filePath = '${downloadsDir.path}/${cleanName}_v$currentRev.mcaddon';
-
-    try {
-      final archive = Archive();
-      final manifestBytes = utf8.encode(const JsonEncoder.withIndent('  ').convert(manifestContent));
-      archive.addFile(ArchiveFile('manifest.json', manifestBytes.length, manifestBytes));
-
-      final encoder = ZipEncoder();
-      final zipData = encoder.encode(archive);
-
-      if (zipData != null) {
-        final outFile = File(filePath);
-        await outFile.writeAsBytes(zipData);
-
-        setState(() {
-          _bundleMasterUuid = masterUuid;
-          _bundleRevision += 1;
-          _bundleName = packName;
-        });
-        await _persistState();
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Exported to Downloads/${outFile.uri.pathSegments.last}'),
-              backgroundColor: const Color(0xFF107C41),
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export error: $e')));
-      }
-    }
-  }
-
-  void _showEditTitleDialog(AddonEntry addon) {
-    final titleController = TextEditingController(text: addon.name);
-    final versionController = TextEditingController(text: addon.currentVersion);
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E232B),
-        title: const Text('Edit Add-on Details', style: TextStyle(color: Color(0xFF52B788))),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder())),
-            const SizedBox(height: 12),
-            TextField(controller: versionController, decoration: const InputDecoration(labelText: 'Version', border: OutlineInputBorder())),
-          ],
-        ),
-        actions: [
-          TextButton(child: const Text('Cancel', style: TextStyle(color: Colors.white70)), onPressed: () => Navigator.pop(ctx)),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
-            child: const Text('Save'),
-            onPressed: () {
-              setState(() {
-                addon.name = titleController.text.trim();
-                addon.currentVersion = versionController.text.trim();
-              });
-              _persistState();
-              Navigator.pop(ctx);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showMojangLegalDisclaimer() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E232B),
-        title: const Text('Legal & Compliance Notice', style: TextStyle(color: Color(0xFF52B788), fontSize: 16)),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white),
-            ),
-            SizedBox(height: 12),
-            Text(
-              'BedrockSmith is an independent community utility tool designed to help players organize local load orders, inspect compatibility, and bundle personal add-on packages. All Minecraft assets, trademarks, and registered names belong to Mojang AB and Microsoft Corporation.',
-              style: TextStyle(fontSize: 12, color: Colors.white70),
-            ),
-          ],
-        ),
-        actions: [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
-            child: const Text('Understood'),
-            onPressed: () => Navigator.pop(ctx),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildListForType(PackType type) {
-    final list = _detectedAddons.where((a) => a.type == type).toList();
-    if (list.isEmpty) {
-      final isRP = type == PackType.resource;
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(isRP ? Icons.palette_outlined : Icons.extension_outlined, size: 64, color: Colors.white24),
-              const SizedBox(height: 16),
-              Text('No ${isRP ? "Resource" : "Behavior"} Packs Scanned', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(
-                'Tap the AI scan button below to analyze your Minecraft screenshots with Gemini Vision.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white54, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(8, 12, 8, 100),
-      itemCount: list.length,
-      itemBuilder: (context, index) {
-        final addon = list[index];
-        return Card(
-          color: const Color(0xFF1E232B),
-          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-          child: ListTile(
-            onTap: () => _showEditTitleDialog(addon),
-            leading: CircleAvatar(
-              backgroundColor: addon.inMegaPack ? const Color(0xFF107C41) : const Color(0xFF262C36),
-              child: Text(
-                addon.originalPriority != null ? '#${addon.originalPriority}' : '${index + 1}',
-                style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
-              ),
-            ),
-            title: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    addon.name,
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: addon.inMegaPack ? Colors.white : Colors.white38,
-                    ),
-                  ),
-                ),
-                if (addon.updateAvailable)
-                  Container(
-                    margin: const EdgeInsets.only(left: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(color: Colors.amber.shade900, borderRadius: BorderRadius.circular(4)),
-                    child: const Text('UPDATE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white)),
-                  ),
-              ],
-            ),
-            subtitle: Text(
-              '${addon.type == PackType.resource ? "RP" : "BP"} • ${addon.currentVersion}${addon.updateAvailable ? " -> ${addon.latestVersion}" : ""}',
-              style: TextStyle(fontSize: 12, color: addon.updateAvailable ? Colors.amberAccent : Colors.white70),
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (addon.curseForgeUrl != null)
-                  IconButton(
-                    icon: const Icon(Icons.open_in_browser, color: Color(0xFF52B788), size: 20),
-                    tooltip: 'View on CurseForge',
-                    onPressed: () => _openUrl(addon.curseForgeUrl),
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white38, size: 18),
-                  tooltip: 'Remove',
-                  onPressed: () {
-                    setState(() => _detectedAddons.removeWhere((a) => a.id == addon.id));
-                    _persistState();
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final activeCount = _detectedAddons.where((a) => a.inMegaPack).length;
-    final updatesCount = _detectedAddons.where((a) => a.updateAvailable).length;
+    final currentType = _tabController.index == 0 ? PackType.resource : PackType.behavior;
+    final currentList = _detectedAddons.where((a) => a.type == currentType).toList();
 
     return Scaffold(
       appBar: AppBar(
+        title: const Text('BEDROCKSMITH'),
         backgroundColor: const Color(0xFF16191F),
-        elevation: 0,
-        title: const Text('BEDROCKSMITH', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1)),
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: const Color(0xFF52B788),
-          labelColor: const Color(0xFF52B788),
-          unselectedLabelColor: Colors.white54,
-          tabs: const [
-            Tab(icon: Icon(Icons.palette), text: 'Resource Packs'),
-            Tab(icon: Icon(Icons.extension), text: 'Behavior Packs'),
-          ],
-        ),
         actions: [
           IconButton(
             icon: Icon(
-              Icons.key,
-              color: _geminiApiKey.isNotEmpty ? const Color(0xFF52B788) : Colors.amberAccent,
+              Icons.vpn_key,
+              color: _geminiApiKey.isEmpty ? Colors.white54 : const Color(0xFF52B788),
             ),
-            tooltip: _geminiApiKey.isNotEmpty ? 'Edit Gemini API Key' : 'Setup Gemini API Key',
+            tooltip: 'Gemini API Key',
             onPressed: _showApiKeyDialog,
           ),
           IconButton(
-            icon: const Icon(Icons.delete_sweep, color: Colors.redAccent),
-            tooltip: 'Clear All',
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            tooltip: 'Clear Current Tab',
             onPressed: () {
-              setState(() => _detectedAddons.clear());
+              setState(() {
+                _detectedAddons.removeWhere((a) => a.type == currentType);
+              });
               _persistState();
             },
           ),
         ],
-      ),
-      drawer: Drawer(
-        backgroundColor: const Color(0xFF16191F),
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            DrawerHeader(
-              decoration: const BoxDecoration(color: Color(0xFF107C41)),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  const Text('BedrockSmith', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-                  const SizedBox(height: 4),
-                  Text('Managing $_bundleName (Rev$_bundleRevision)', style: const TextStyle(fontSize: 12, color: Colors.white70)),
-                ],
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.view_list, color: Color(0xFF52B788)),
-              title: const Text('Scanned Load Order'),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              leading: Badge(
-                isLabelVisible: updatesCount > 0,
-                label: Text('$updatesCount'),
-                backgroundColor: Colors.amber.shade900,
-                child: const Icon(Icons.system_update_alt, color: Colors.amber),
-              ),
-              title: const Text('CurseForge Updates Hub'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => UpdatesHubScreen(addons: _detectedAddons)),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.layers, color: Colors.white70),
-              title: const Text('Manage Mega-Pack Load Order'),
-              onTap: () {
-                Navigator.pop(context);
-                _showManageMegaPackSheet();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.archive, color: Colors.white70),
-              title: const Text('Export Mega-Pack'),
-              onTap: () {
-                Navigator.pop(context);
-                _showExportDialog();
-              },
-            ),
-            ListTile(
-              leading: Icon(
-                Icons.key,
-                color: _geminiApiKey.isNotEmpty ? const Color(0xFF52B788) : Colors.amberAccent,
-              ),
-              title: Text(_geminiApiKey.isNotEmpty ? 'Edit Gemini AI Key (Saved)' : 'Setup Gemini AI Key'),
-              onTap: () {
-                Navigator.pop(context);
-                _showApiKeyDialog();
-              },
-            ),
-            const Divider(color: Colors.white24),
-            ListTile(
-              leading: const Icon(Icons.info_outline, color: Colors.white70),
-              title: const Text('Play Store Compliance Notice'),
-              onTap: () {
-                Navigator.pop(context);
-                _showMojangLegalDisclaimer();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.privacy_tip_outlined, color: Colors.white70),
-              title: const Text('Privacy Policy'),
-              onTap: () {
-                Navigator.pop(context);
-                _openUrl('https://github.com/yamanshing-arch/BedrockSmith#privacy-policy');
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
-              title: const Text('Gemini Assistant Diagnostics'),
-              onTap: () async {
-                Navigator.pop(context);
-                final buffer = StringBuffer();
-                buffer.writeln('=== BedrockSmith Support Report ===');
-                buffer.writeln('App Version: v1.0.0 (AI Vision Enabled)');
-                buffer.writeln('Bundle UUID: ${_bundleMasterUuid ?? "None"}');
-                buffer.writeln('Bundle Revision: $_bundleRevision');
-                buffer.writeln('Total Detected Add-ons: ${_detectedAddons.length}');
-                for (final p in _detectedAddons) {
-                  buffer.writeln('#${p.originalPriority ?? "?"} ${p.name} (${p.currentVersion}) [${p.type.name.toUpperCase()}]');
-                }
-                await Clipboard.setData(ClipboardData(text: buffer.toString()));
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Diagnostics copied! Opening Gemini...'), backgroundColor: Color(0xFF107C41)),
-                  );
-                }
-                final Uri url = Uri.parse('https://gemini.google.com/');
-                if (await canLaunchUrl(url)) launchUrl(url, mode: LaunchMode.externalApplication);
-              },
-            ),
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: const Color(0xFF52B788),
+          tabs: const [
+            Tab(icon: Icon(Icons.palette), text: 'Resource Packs'),
+            Tab(icon: Icon(Icons.extension), text: 'Behavior Packs'),
           ],
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: const Color(0xFF107C41),
         foregroundColor: Colors.white,
-        icon: _isProcessing
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-            : const Icon(Icons.auto_awesome),
-        label: Text(
-          _isProcessing
-              ? (_statusMessage.isNotEmpty ? _statusMessage : 'AI Analyzing...')
-              : (_tabController.index == 0 ? 'AI Scan Resource Packs' : 'AI Scan Behavior Packs'),
-        ),
-        onPressed: _isProcessing
-            ? null
-            : () => _scanScreenshotsWithAI(_tabController.index == 0 ? PackType.resource : PackType.behavior),
+        onPressed: _isProcessing ? null : () => _scanScreenshotsWithAI(currentType),
+        icon: const Icon(Icons.auto_awesome),
+        label: Text('AI Scan ${currentType == PackType.resource ? 'Resource' : 'Behavior'} Packs'),
       ),
-      bottomNavigationBar: _detectedAddons.isNotEmpty
-          ? Container(
-              color: const Color(0xFF16191F),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: updatesCount > 0 ? Colors.amber.shade900 : const Color(0xFF107C41),
-                    foregroundColor: Colors.white,
-                    elevation: 2,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  icon: Icon(updatesCount > 0 ? Icons.system_update_alt : Icons.tune),
-                  label: Text(
-                    updatesCount > 0
-                        ? 'VIEW $updatesCount UPDATE(S) ON CURSEFORGE'
-                        : 'MANAGE LOAD ORDER ($activeCount ACTIVE)',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                  ),
-                  onPressed: updatesCount > 0
-                      ? () => Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => UpdatesHubScreen(addons: _detectedAddons)),
-                          )
-                      : _showManageMegaPackSheet,
-                ),
+      bottomNavigationBar: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        color: const Color(0xFF16191F),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E232B),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: _showManageMegaPackSheet,
+              icon: const Icon(Icons.inventory_2, size: 16),
+              label: const Text('Mega-Pack Settings'),
+            ),
+            Text(
+              '${currentList.length} Loaded',
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      body: _isProcessing
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const CircularProgressIndicator(color: Color(0xFF52B788)),
+                  const SizedBox(height: 16),
+                  Text(_statusMessage, style: const TextStyle(color: Colors.white70)),
+                ],
               ),
             )
-          : null,
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildListForType(PackType.resource),
-          _buildListForType(PackType.behavior),
-        ],
-      ),
-    );
-  }
-}
-
-class UpdatesHubScreen extends StatelessWidget {
-  final List<AddonEntry> addons;
-  const UpdatesHubScreen({super.key, required this.addons});
-
-  @override
-  Widget build(BuildContext context) {
-    final updateList = addons.where((a) => a.updateAvailable).toList();
-
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF16191F),
-        title: const Text('Add-on Updates Hub', style: TextStyle(fontWeight: FontWeight.bold)),
-      ),
-      body: updateList.isEmpty
-          ? const Center(
-              child: Text('All scanned add-ons are up to date!', style: TextStyle(color: Colors.white54)),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: updateList.length,
-              itemBuilder: (context, index) {
-                final item = updateList[index];
-                return Card(
-                  color: const Color(0xFF1E232B),
-                  margin: const EdgeInsets.symmetric(vertical: 6),
-                  child: ListTile(
-                    title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text(
-                      'Current: ${item.currentVersion}  ->  Latest:${item.latestVersion ?? "Unknown"}',
-                      style: const TextStyle(color: Colors.amberAccent, fontSize: 12),
-                    ),
-                    trailing: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF107C41), foregroundColor: Colors.white),
-                      icon: const Icon(Icons.download, size: 16),
-                      label: const Text('Update'),
-                      onPressed: () async {
-                        if (item.curseForgeUrl != null) {
-                          final uri = Uri.parse(item.curseForgeUrl!);
-                          if (await canLaunchUrl(uri)) launchUrl(uri, mode: LaunchMode.externalApplication);
-                        }
-                      },
-                    ),
+          : currentList.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        currentType == PackType.resource ? Icons.palette_outlined : Icons.extension_outlined,
+                        size: 64,
+                        color: Colors.white24,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No ${currentType == PackType.resource ? 'Resource' : 'Behavior'} Packs scanned yet.',
+                        style: const TextStyle(color: Colors.white54),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Take screenshots of your active pack list in Minecraft,\nthen tap "AI Scan" below.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white30, fontSize: 12),
+                      ),
+                    ],
                   ),
-                );
-              },
-            ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 80, top: 8),
+                  itemCount: currentList.length,
+                  itemBuilder: (ctx, idx) {
+                    final item = currentList[idx];
+                    return Card(
+                      color: const Color(0xFF1E232B),
+                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: const Color(0xFF111418),
+                          child: Text(
+                            item.originalPriority != null ? '#${item.originalPriority}' : '-',
+                            style: const TextStyle(color: Color(0xFF52B788), fontSize: 12),
+                          ),
+                        ),
+                        title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Installed: ${item.currentVersion}', style: const TextStyle(fontSize: 12)),
+                            if (item.latestVersion != null)
+                              Text(
+                                'CurseForge: ${item.latestVersion}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: item.updateAvailable ? Colors.amber : const Color(0xFF52B788),
+                                ),
+                              ),
+                          ],
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (item.curseForgeUrl != null && item.curseForgeUrl!.isNotEmpty)
+                              IconButton(
+                                icon: const Icon(Icons.open_in_new, size: 20, color: Color(0xFF52B788)),
+                                onPressed: () => _openUrl(item.curseForgeUrl),
+                              ),
+                            IconButton(
+                              icon: const Icon(Icons.close, size: 18, color: Colors.white30),
+                              onPressed: () {
+                                setState(() {
+                                  _detectedAddons.remove(item);
+                                });
+                                _persistState();
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }
