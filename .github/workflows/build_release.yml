@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Recreate Android platform files
+        run: flutter create . --platforms=android --org com.bedrocksmith
+
       - name: Generate Launcher Icons
         run: dart run flutter_launcher_icons
 
