@@ -298,21 +298,13 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     try {
       final activeModelName = await _resolveBestGeminiModel();
-      setState(() => _statusMessage = 'Connecting to $activeModelName...');
-
-      final model = GenerativeModel(
-        model: activeModelName,
-        apiKey: _geminiApiKey,
-        generationConfig: GenerationConfig(
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        ),
-      );
+      final fallbackChain = [activeModelName, 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.8-flash']
+          .toSet()
+          .toList();
 
       final List<AddonEntry> newAddons = [];
 
       for (int i = 0; i < images.length; i++) {
-        setState(() => _statusMessage = 'AI reading screenshot ${i + 1} of ${images.length} ($activeModelName)...');
         final file = File(images[i].path);
         final bytes = await file.readAsBytes();
 
@@ -333,39 +325,80 @@ Return ONLY a JSON array with this structure:
 ''');
 
         final imagePart = DataPart('image/jpeg', bytes);
-        final response = await model.generateContent([
-          Content.multi([prompt, imagePart])
-        ]);
 
-        if (response.text != null && response.text!.isNotEmpty) {
-          try {
-            final List parsed = jsonDecode(response.text!);
-            for (final item in parsed) {
-              final rawName = (item['name'] ?? '').toString().trim();
-              if (rawName.isEmpty) continue;
-              final int? priority = item['priority'] is int ? item['priority'] : int.tryParse('${item['priority']}');
-              final String version = (item['version'] ?? 'v1.0.0').toString().trim();
-              final lower = rawName.toLowerCase();
-              final isBridge = lower.contains('trinket') ||
-                  lower.contains('curios') ||
-                  lower.contains('amulet') ||
-                  lower.contains('backpack') ||
-                  lower.contains('neck') ||
-                  lower.contains('api') ||
-                  lower.contains('core');
+        GenerateContentResponse? response;
+        String? lastExceptionMessage;
 
-              newAddons.add(AddonEntry(
-                id: const Uuid().v4(),
-                name: rawName,
-                currentVersion: version,
-                type: targetType,
-                originalPriority: priority,
-                inMegaPack: true,
-                isTrinketBridge: isBridge,
-              ));
+        // Try candidates with backoff if a 503 spike occurs
+        for (final currentModelCandidate in fallbackChain) {
+          setState(() => _statusMessage = 'Reading image ${i + 1}/${images.length} with $currentModelCandidate...');
+
+          final model = GenerativeModel(
+            model: currentModelCandidate,
+            apiKey: _geminiApiKey,
+            generationConfig: GenerationConfig(
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+            ),
+          );
+
+          int retries = 0;
+          while (retries < 2) {
+            try {
+              response = await model.generateContent([
+                Content.multi([prompt, imagePart])
+              ]);
+              if (response.text != null && response.text!.isNotEmpty) break;
+            } catch (err) {
+              lastExceptionMessage = err.toString();
+              if (lastExceptionMessage.contains('503') ||
+                  lastExceptionMessage.contains('UNAVAILABLE') ||
+                  lastExceptionMessage.contains('high demand')) {
+                retries++;
+                setState(() => _statusMessage = '$currentModelCandidate busy (503). Retrying in ${retries * 2}s...');
+                await Future.delayed(Duration(seconds: retries * 2));
+              } else {
+                break;
+              }
             }
-          } catch (_) {}
+          }
+
+          if (response != null && response.text != null && response.text!.isNotEmpty) {
+            break;
+          }
         }
+
+        if (response == null || response.text == null || response.text!.isEmpty) {
+          throw Exception(lastExceptionMessage ?? 'All models currently unavailable. Please try again shortly.');
+        }
+
+        try {
+          final List parsed = jsonDecode(response.text!);
+          for (final item in parsed) {
+            final rawName = (item['name'] ?? '').toString().trim();
+            if (rawName.isEmpty) continue;
+            final int? priority = item['priority'] is int ? item['priority'] : int.tryParse('${item['priority']}');
+            final String version = (item['version'] ?? 'v1.0.0').toString().trim();
+            final lower = rawName.toLowerCase();
+            final isBridge = lower.contains('trinket') ||
+                lower.contains('curios') ||
+                lower.contains('amulet') ||
+                lower.contains('backpack') ||
+                lower.contains('neck') ||
+                lower.contains('api') ||
+                lower.contains('core');
+
+            newAddons.add(AddonEntry(
+              id: const Uuid().v4(),
+              name: rawName,
+              currentVersion: version,
+              type: targetType,
+              originalPriority: priority,
+              inMegaPack: true,
+              isTrinketBridge: isBridge,
+            ));
+          }
+        } catch (_) {}
       }
 
       for (int i = 0; i < newAddons.length; i++) {
