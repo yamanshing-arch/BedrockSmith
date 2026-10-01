@@ -260,15 +260,15 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
             final name = (m['name'] ?? '').toString().toLowerCase();
             return methods.contains('generateContent') &&
                 name.contains('flash') &&
-                !name.contains('omni'); // Filters out zero-quota omni models
+                !name.contains('omni') &&
+                !name.contains('2.5');
           }).map((m) {
             String name = (m['name'] ?? '').toString();
             if (name.startsWith('models/')) name = name.replaceFirst('models/', '');
             return name;
           }).toList();
 
-          // Prioritize stable free-tier endpoints
-          for (final candidate in ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest']) {
+          for (final candidate in ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']) {
             if (flashModels.contains(candidate)) {
               return candidate;
             }
@@ -280,7 +280,7 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
         }
       }
     } catch (_) {}
-    return 'gemini-1.5-flash';
+    return 'gemini-3.8-flash';
   }
 
   Future<void> _scanScreenshotsWithAI(PackType targetType) async {
