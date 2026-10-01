@@ -294,9 +294,9 @@ Return ONLY a JSON array with this structure:
 ''');
 
         final imagePart = DataPart('image/jpeg', bytes);
-
         GenerateContentResponse? response;
         int attempts = 0;
+
         while (attempts < 3) {
           try {
             setState(() => _statusMessage = 'Reading image ${i + 1}/${images.length} ($activeModelName)...');
@@ -428,7 +428,13 @@ Return ONLY a JSON array with this structure:
                 lowerLocal.contains(remoteName) ||
                 _calculateSimilarity(lowerRemote, lowerLocal) > 0.65) {
               addon.name = remoteName;
-              addon.curseForgeUrl = mod['links']?['websiteUrl'] ?? '';
+              
+              // Route to Bedrock add-ons URL rather than generic Java mod URL
+              final slug = (mod['slug'] ?? '').toString();
+              addon.curseForgeUrl = slug.isNotEmpty
+                  ? 'https://www.curseforge.com/minecraft-bedrock/addons/$slug'
+                  : (mod['links']?['websiteUrl'] ?? '');
+
               if (mod['latestFilesIndexes'] != null && (mod['latestFilesIndexes'] as List).isNotEmpty) {
                 final remoteVer = mod['latestFilesIndexes'][0]['displayName'];
                 if (remoteVer != null) {
@@ -594,6 +600,16 @@ Return ONLY a JSON array with this structure:
               ),
             ),
             ListTile(
+              leading: const Icon(Icons.open_in_browser, color: Color(0xFFF16436)),
+              title: const Text('CurseForge Bedrock Add-ons'),
+              subtitle: const Text('Browse Bedrock packs', style: TextStyle(fontSize: 11, color: Colors.white54)),
+              onTap: () {
+                Navigator.pop(context);
+                _openUrl('https://www.curseforge.com/minecraft-bedrock/addons');
+              },
+            ),
+            const Divider(color: Colors.white12),
+            ListTile(
               leading: const Icon(Icons.inventory_2, color: Color(0xFF52B788)),
               title: const Text('Mega-Pack Settings'),
               onTap: () {
@@ -607,6 +623,18 @@ Return ONLY a JSON array with this structure:
               onTap: () {
                 Navigator.pop(context);
                 _showApiKeyDialog();
+              },
+            ),
+            const Divider(color: Colors.white12),
+            ListTile(
+              leading: const Icon(Icons.delete_sweep, color: Colors.redAccent),
+              title: const Text('Clear All Detected Add-ons'),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() {
+                  _detectedAddons.clear();
+                });
+                _persistState();
               },
             ),
           ],
