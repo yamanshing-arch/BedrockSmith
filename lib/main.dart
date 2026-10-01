@@ -167,12 +167,12 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E232B),
         title: Row(
-          children: [
-            const Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
-            const SizedBox(width: 8),
+          children: const [
+            Icon(Icons.auto_awesome, color: Color(0xFF52B788)),
+            SizedBox(width: 8),
             Text(
-              _geminiApiKey.isEmpty ? 'Setup Gemini AI Key' : 'Gemini AI Key Settings',
-              style: const TextStyle(fontSize: 16),
+              'Gemini AI Key Settings',
+              style: TextStyle(fontSize: 16),
             ),
           ],
         ),
@@ -247,42 +247,6 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
     );
   }
 
-  Future<String> _resolveBestGeminiModel() async {
-    try {
-      final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models?key=$_geminiApiKey');
-      final response = await http.get(url).timeout(const Duration(seconds: 4));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['models'] != null && data['models'] is List) {
-          final List models = data['models'];
-          final flashModels = models.where((m) {
-            final methods = (m['supportedGenerationMethods'] as List?)?.map((e) => e.toString()).toList() ?? [];
-            final name = (m['name'] ?? '').toString().toLowerCase();
-            return methods.contains('generateContent') &&
-                name.contains('flash') &&
-                !name.contains('omni') &&
-                !name.contains('2.5');
-          }).map((m) {
-            String name = (m['name'] ?? '').toString();
-            if (name.startsWith('models/')) name = name.replaceFirst('models/', '');
-            return name;
-          }).toList();
-
-          for (final candidate in ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']) {
-            if (flashModels.contains(candidate)) {
-              return candidate;
-            }
-          }
-
-          if (flashModels.isNotEmpty) {
-            return flashModels.first;
-          }
-        }
-      }
-    } catch (_) {}
-    return 'gemini-3.8-flash';
-  }
-
   Future<void> _scanScreenshotsWithAI(PackType targetType) async {
     if (_geminiApiKey.isEmpty) {
       _showApiKeyDialog();
@@ -293,14 +257,19 @@ class _AddonScannerHomeState extends State<AddonScannerHome> with SingleTickerPr
 
     setState(() {
       _isProcessing = true;
-      _statusMessage = 'Selecting active Gemini model...';
+      _statusMessage = 'Initializing gemini-3.8-flash model...';
     });
 
     try {
-      final activeModelName = await _resolveBestGeminiModel();
-      final fallbackChain = [activeModelName, 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.8-flash']
-          .toSet()
-          .toList();
+      const activeModelName = 'gemini-3.8-flash';
+      final model = GenerativeModel(
+        model: activeModelName,
+        apiKey: _geminiApiKey,
+        generationConfig: GenerationConfig(
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        ),
+      );
 
       final List<AddonEntry> newAddons = [];
 
@@ -327,49 +296,24 @@ Return ONLY a JSON array with this structure:
         final imagePart = DataPart('image/jpeg', bytes);
 
         GenerateContentResponse? response;
-        String? lastExceptionMessage;
-
-        // Try candidates with backoff if a 503 spike occurs
-        for (final currentModelCandidate in fallbackChain) {
-          setState(() => _statusMessage = 'Reading image ${i + 1}/${images.length} with $currentModelCandidate...');
-
-          final model = GenerativeModel(
-            model: currentModelCandidate,
-            apiKey: _geminiApiKey,
-            generationConfig: GenerationConfig(
-              responseMimeType: 'application/json',
-              temperature: 0.1,
-            ),
-          );
-
-          int retries = 0;
-          while (retries < 2) {
-            try {
-              response = await model.generateContent([
-                Content.multi([prompt, imagePart])
-              ]);
-              if (response.text != null && response.text!.isNotEmpty) break;
-            } catch (err) {
-              lastExceptionMessage = err.toString();
-              if (lastExceptionMessage.contains('503') ||
-                  lastExceptionMessage.contains('UNAVAILABLE') ||
-                  lastExceptionMessage.contains('high demand')) {
-                retries++;
-                setState(() => _statusMessage = '$currentModelCandidate busy (503). Retrying in ${retries * 2}s...');
-                await Future.delayed(Duration(seconds: retries * 2));
-              } else {
-                break;
-              }
-            }
-          }
-
-          if (response != null && response.text != null && response.text!.isNotEmpty) {
-            break;
+        int attempts = 0;
+        while (attempts < 3) {
+          try {
+            setState(() => _statusMessage = 'Reading image ${i + 1}/${images.length} ($activeModelName)...');
+            response = await model.generateContent([
+              Content.multi([prompt, imagePart])
+            ]);
+            if (response.text != null && response.text!.isNotEmpty) break;
+          } catch (err) {
+            attempts++;
+            if (attempts >= 3) rethrow;
+            setState(() => _statusMessage = 'Server busy (attempt $attempts). Waiting ${attempts * 3}s...');
+            await Future.delayed(Duration(seconds: attempts * 3));
           }
         }
 
         if (response == null || response.text == null || response.text!.isEmpty) {
-          throw Exception(lastExceptionMessage ?? 'All models currently unavailable. Please try again shortly.');
+          throw Exception('Failed to receive response from Gemini API.');
         }
 
         try {
@@ -629,6 +573,45 @@ Return ONLY a JSON array with this structure:
     final currentList = _detectedAddons.where((a) => a.type == currentType).toList();
 
     return Scaffold(
+      drawer: Drawer(
+        backgroundColor: const Color(0xFF16191F),
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration: const BoxDecoration(color: Color(0xFF107C41)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: const [
+                  Text(
+                    'BedrockSmith',
+                    style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 4),
+                  Text('Add-on Organizer & Bundler', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.inventory_2, color: Color(0xFF52B788)),
+              title: const Text('Mega-Pack Settings'),
+              onTap: () {
+                Navigator.pop(context);
+                _showManageMegaPackSheet();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.vpn_key, color: Colors.white70),
+              title: const Text('Gemini API Key'),
+              onTap: () {
+                Navigator.pop(context);
+                _showApiKeyDialog();
+              },
+            ),
+          ],
+        ),
+      ),
       appBar: AppBar(
         title: const Text('BEDROCKSMITH'),
         backgroundColor: const Color(0xFF16191F),
